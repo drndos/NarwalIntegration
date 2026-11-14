@@ -108,7 +108,7 @@ COLOR_UNASSIGNED_FLOOR = (200, 200, 200)  # floor not assigned to a room
 COLOR_UNASSIGNED_OBSTACLE = (80, 80, 80)  # obstacle not in a room
 COLOR_FALLBACK = (180, 180, 180)     # unknown room ID
 MAP_RENDER_SCALE = 3
-ROOM_LABEL_FONT_SCALE = 10
+ROOM_LABEL_FONT_SCALE = 7
 OBSTACLE_LABEL_FONT_SCALE = 6
 FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-SemiBold.ttf",
@@ -129,7 +129,12 @@ def _load_font(image_font: object, size: int):
             return image_font.truetype(path, size)
         except OSError:
             continue
-    return image_font.load_default()
+    # No TrueType font on the system (the Home Assistant image ships none):
+    # Pillow >= 10.1 renders its built-in font at any size; older ones cannot.
+    try:
+        return image_font.load_default(size=size)
+    except TypeError:
+        return image_font.load_default()
 
 
 def _grid_to_pixel(value: float, scale: float) -> float:
@@ -174,6 +179,80 @@ def _draw_label(
         font=font,
         stroke_width=max(1, padding // 2),
         stroke_fill=stroke_fill,
+    )
+
+
+# App-style room labels: a ring left of the name, or the room's position in the
+# cleaning order on a filled circle when the room is selected.
+ROOM_LABEL_FILL = (0, 0, 0, 120)
+ROOM_LABEL_SELECTED_FILL = (36, 44, 82, 235)
+# Unselected rooms fade towards this while a room selection exists.
+ROOM_FADE_COLOR = (228, 231, 238)
+ROOM_FADE_AMOUNT = 0.7
+
+
+def _draw_room_label(
+    draw: ImageDraw.ImageDraw,
+    xy: tuple[int, int],
+    text: str,
+    font: object,
+    number: int | None = None,
+    *,
+    padding: int = 4,
+) -> None:
+    """Draw a room label pill centred on ``xy``: ring or number, then the name."""
+    cx, cy = xy
+    bbox = font.getbbox(text)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    diameter = th + padding
+    gap = padding
+    pill_w = padding + diameter + gap + tw + padding * 2
+    pill_h = max(diameter, th) + padding * 2
+    left = cx - pill_w // 2
+    top = cy - pill_h // 2
+    selected = number is not None
+    draw.rounded_rectangle(
+        [left, top, left + pill_w, top + pill_h],
+        radius=pill_h // 2,
+        fill=ROOM_LABEL_SELECTED_FILL if selected else ROOM_LABEL_FILL,
+    )
+    circle = [
+        left + padding,
+        cy - diameter // 2,
+        left + padding + diameter,
+        cy - diameter // 2 + diameter,
+    ]
+    if selected:
+        draw.ellipse(circle, fill=(255, 255, 255, 255))
+        digits = str(number)
+        dbox = font.getbbox(digits)
+        draw.text(
+            (
+                circle[0] + (diameter - (dbox[2] - dbox[0])) / 2 - dbox[0],
+                circle[1] + (diameter - (dbox[3] - dbox[1])) / 2 - dbox[1],
+            ),
+            digits,
+            fill=ROOM_LABEL_SELECTED_FILL[:3],
+            font=font,
+        )
+    else:
+        draw.ellipse(circle, outline=(255, 255, 255, 230), width=max(2, padding // 2))
+    draw.text(
+        (left + padding + diameter + gap - bbox[0], cy - th / 2 - bbox[1]),
+        text,
+        fill=(255, 255, 255),
+        font=font,
+        stroke_width=0 if selected else max(1, padding // 3),
+        stroke_fill=(20, 20, 20),
+    )
+
+
+def _fade(color: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Blend a room colour towards the faded tone of unselected rooms."""
+    return tuple(
+        int(round(c + (f - c) * ROOM_FADE_AMOUNT))
+        for c, f in zip(color, ROOM_FADE_COLOR)
     )
 
 
@@ -384,19 +463,22 @@ def lookup_room_at_grid(
     return (room_id, f"room_{room_id}{wall}")
 
 
-def room_label_points(
+def room_centroids(
     compressed: bytes,
     width: int,
     height: int,
-    room_names: dict[int, str] | None,
-) -> list[tuple[str, float, float]]:
-    """Return room label centre points in unflipped grid coordinates."""
-    if not compressed or width <= 0 or height <= 0 or not room_names:
-        return []
+    room_ids: set[int] | None = None,
+) -> dict[int, tuple[float, float]]:
+    """Return each room's floor centroid in unflipped grid coordinates.
+
+    ``room_ids`` limits the result to those rooms; ``None`` keeps every room.
+    """
+    if not compressed or width <= 0 or height <= 0:
+        return {}
 
     decompressed = decompress_map(compressed)
     if not decompressed:
-        return []
+        return {}
 
     pixels = _decode_packed_varints(decompressed)
     expected = width * height
@@ -413,7 +495,7 @@ def room_label_points(
             continue
         room_id = val >> 8
         ptype = val & 0xFF
-        if room_id not in room_names or ptype & 0x10:
+        if ptype & 0x10 or (room_ids is not None and room_id not in room_ids):
             continue
         x = i % width
         y = i // width
@@ -421,16 +503,27 @@ def room_label_points(
         room_sum_y[room_id] = room_sum_y.get(room_id, 0) + y
         room_count[room_id] = room_count.get(room_id, 0) + 1
 
-    points: list[tuple[str, float, float]] = []
-    for room_id, name in room_names.items():
-        if not name or room_id not in room_count:
-            continue
-        points.append((
-            name,
-            room_sum_x[room_id] / room_count[room_id],
-            room_sum_y[room_id] / room_count[room_id],
-        ))
-    return points
+    return {
+        room_id: (room_sum_x[room_id] / count, room_sum_y[room_id] / count)
+        for room_id, count in room_count.items()
+    }
+
+
+def room_label_points(
+    compressed: bytes,
+    width: int,
+    height: int,
+    room_names: dict[int, str] | None,
+) -> list[tuple[str, float, float]]:
+    """Return room label centre points in unflipped grid coordinates."""
+    if not room_names:
+        return []
+    centroids = room_centroids(compressed, width, height, set(room_names))
+    return [
+        (name, *centroids[room_id])
+        for room_id, name in room_names.items()
+        if name and room_id in centroids
+    ]
 
 
 def _darken(color: tuple[int, int, int], amount: int = 80) -> tuple[int, int, int]:
@@ -752,6 +845,7 @@ def render_base_map(
     show_obstacle_labels: bool = True,
     show_room_labels: bool = True,
     show_dock: bool = True,
+    highlight_rooms: set[int] | frozenset[int] | None = None,
 ) -> Image.Image | None:
     """Render the static floor plan as a PIL Image (no robot overlay).
 
@@ -765,6 +859,8 @@ def render_base_map(
         show_obstacle_labels: Whether to draw furniture/obstacle labels.
         show_room_labels: Whether to draw room labels into the base image.
         show_dock: Whether to draw the dock into the base image.
+        highlight_rooms: Selected rooms; when not empty every other room is
+            drawn faded, as the Narwal app does while picking rooms.
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -810,6 +906,8 @@ def render_base_map(
                 if 1 <= room_id <= len(ROOM_COLORS)
                 else COLOR_FALLBACK
             )
+            if highlight_rooms and room_id not in highlight_rooms:
+                base = _fade(base)
 
             if ptype & 0x10:
                 px[x, y] = _opaque(_darken(base))
@@ -1016,13 +1114,20 @@ def render_overlay(
 
     if room_labels:
         font = _load_font(ImageFont, ROOM_LABEL_FONT_SCALE * int(round(scale)))
-        for label, grid_x, grid_y in room_labels:
+        for label, grid_x, grid_y, *rest in room_labels:
             point = final_point(grid_x, grid_y)
             if point is None:
                 continue
             x, y = point
             if -80 <= x <= img.width + 80 and -80 <= y <= img.height + 80:
-                _draw_label(draw, (x, y), label, font, padding=max(4, int(scale)))
+                _draw_room_label(
+                    draw,
+                    (x, y),
+                    label,
+                    font,
+                    rest[0] if rest else None,
+                    padding=max(4, int(scale)),
+                )
 
     if dock_x is not None and dock_y is not None:
         point = final_point(dock_x, dock_y)

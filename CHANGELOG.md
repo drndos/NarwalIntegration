@@ -11,6 +11,12 @@ change that can alter the behaviour of an existing automation or dashboard.
 
 ## [Unreleased]
 
+- **Added:** `custom:narwal-map-card`, served by the integration: tap rooms on the map in the order to clean them; each shows its number (1, 2, 3 ...) and **Start** cleans them in that order. The map camera gains a `rooms` attribute (room id, name and centroid in map grid coordinates).
+- **Changed:** `tools/gen_dashboard.py` writes one `narwal_section.yaml` (map; vacuum with clean mode, suction, water, scrub, route and passes; remote control) instead of `narwal_rooms_section.yaml` and `narwal_vacuum_section.yaml`. The room-picker panel, its `input_select` and `script.narwal_clean_room` are gone, and it no longer needs the `state-switch` card.
+- **Changed:** while rooms are picked, the device-level *Mode*, *Suction*, *Water*, *Scrub*, *Route* and *Passes* selects show the first picked room's profile and set it on every picked room, instead of going unavailable.
+- **Changed:** picking a room (its *selected* switch) puts it after the rooms picked before it in the cleaning order.
+- **Changed:** room labels on the map look like the Narwal app's: a ring left of the name, or the room's place in the cleaning order on a filled circle once picked; while rooms are picked the other rooms are drawn faded.
+- **Fixed:** map labels were drawn in Pillow's tiny fixed bitmap font because the Home Assistant image has no TrueType fonts; they now use Pillow's built-in font at the intended size.
 - **Added:** remote control (manual drive) on the Flow 2: `narwal.remote_control_start`, `narwal.remote_control_move`, `narwal.remote_control_stop`, a *Remote control* switch, a *Remote control suction* select, and diagnostic *Suction cool-down* and *Remote control suction running* entities. See [docs/REMOTE-CONTROL.md](docs/REMOTE-CONTROL.md). Untested on hardware through Home Assistant yet.
 - **Fixed:** working status `21` (remote control, e.g. driven from the Narwal app) is no longer logged as unknown and no longer turns the vacuum `unknown`; it reads as idle, or cleaning while suction runs.
 - **Fixed:** negative protobuf varints are encoded as 10-byte sign-extended values (needed for reverse and right turns).

@@ -13,8 +13,7 @@ from tools.gen_dashboard import (  # noqa: E402
     collect,
     collect_vacuum,
     drive_script_config,
-    rooms_section,
-    vacuum_sections,
+    narwal_section,
 )
 
 
@@ -97,31 +96,62 @@ def test_collects_room_order_without_corrupting_room_name() -> None:
     assert rooms[4]["entities"]["clean_order"] == ("number.narwal_kitchen_cleaning_order")
 
 
-def test_room_panel_includes_numeric_order_control() -> None:
-    """Generated room panels expose the persisted order number."""
-    rooms = {
-        4: {
-            "name": "Kitchen",
-            "entities": {
-                "selected": "switch.narwal_kitchen_selected",
-                "clean_order": "number.narwal_kitchen_cleaning_order",
-            },
-        }
+KITCHEN = {
+    4: {
+        "name": "Kitchen",
+        "entities": {
+            "selected": "switch.narwal_kitchen_selected",
+            "clean_order": "number.narwal_kitchen_cleaning_order",
+            "mode": "select.narwal_kitchen_mode",
+        },
+    },
+    5: {"name": "Hall", "entities": {"selected": "switch.narwal_hall_selected"}},
+}
+
+
+def test_one_section_holds_map_vacuum_settings_and_remote() -> None:
+    """Map, then vacuum with all six clean settings under it, then remote control."""
+    ents = {"map": "camera.n_map", "remote_control": "switch.n_rc"}
+    settings = {k: f"select.n_{k}" for k in ("mode", "suction", "water", "scrub", "route", "passes")}
+
+    cards = narwal_section(ents, "vacuum.n", KITCHEN, settings)["cards"]
+
+    assert cards[1] == {
+        "type": "custom:narwal-map-card",
+        "camera": "camera.n_map",
+        "rooms": [
+            {"id": 4, "selected": "switch.narwal_kitchen_selected"},
+            {"id": 5, "selected": "switch.narwal_hall_selected"},
+        ],
+        "grid_options": {"columns": 12},
     }
+    assert cards[2]["entity"] == "vacuum.n"
+    assert [c["entity"] for c in cards[3:9]] == list(settings.values())
+    remote_at = next(i for i, c in enumerate(cards) if c.get("heading") == "Remote control")
+    assert remote_at > 8
+    # No per-room settings panel and nothing beyond built-in cards and the map card.
+    assert not any("narwal_kitchen" in str(c.get("entity")) for c in cards)
+    assert all(not c["type"].startswith("custom:") for c in cards[2:])
 
-    section = rooms_section(
-        rooms,
-        {},
-        "vacuum.narwal",
-        "input_select.narwal_room",
-        "script.narwal_clean_room",
-    )
-    room_cards = section["cards"][-1]["states"]["Kitchen"]["cards"]
 
-    assert room_cards[1]["entity"] == "number.narwal_kitchen_cleaning_order"
-    assert room_cards[1]["features"] == [
-        {"type": "numeric-input", "style": "buttons"}
+def test_device_settings_match_exact_keys() -> None:
+    """``work_mode`` must not be taken for the ``mode`` select."""
+    entries = [
+        {"unique_id": "dev_mode", "entity_id": "select.n_mode", "disabled_by": None},
+        {"unique_id": "dev_work_mode", "entity_id": "select.n_clean_mode", "disabled_by": None},
+        {"unique_id": "dev_route", "entity_id": "select.n_route", "disabled_by": "user"},
     ]
+
+    _, globals_, _ = collect(entries, map_id=None)
+
+    assert globals_ == {"mode": "select.n_mode"}
+
+
+def test_section_without_rooms_falls_back_to_plain_map() -> None:
+    """No enabled room switches: a plain camera card."""
+    cards = narwal_section({"map": "camera.n_map"}, "vacuum.n")["cards"]
+
+    assert cards[1]["type"] == "picture-entity"
 
 
 DEV = "0123456789abcdef0123456789abcdef"
@@ -145,9 +175,9 @@ def test_vacuum_sections_drive_pad_targets_vacuum_and_hides_when_off() -> None:
     assert ents["map"] == "camera.n_map"
     assert "suction_cooldown" not in ents
 
-    robot, remote = vacuum_sections(ents, "vacuum.n")
-    assert robot["cards"][1]["entity"] == "camera.n_map"
-    pad = [c for c in remote["cards"] if c["type"] == "button"]
+    cards = narwal_section(ents, "vacuum.n")["cards"]
+    assert cards[1]["entity"] == "camera.n_map"
+    pad = [c for c in cards if c["type"] == "button"]
     assert len(pad) == 9
     for button in pad:
         assert button["visibility"] == [
@@ -162,7 +192,7 @@ def test_vacuum_sections_drive_pad_targets_vacuum_and_hides_when_off() -> None:
     assert still["tap_action"]["perform_action"] == "narwal.remote_control_move"
     assert still["tap_action"]["target"] == {"entity_id": "vacuum.n"}
     assert still["tap_action"]["data"] == {"linear": 0, "angular": 0, "duration": 0}
-    slider = next(c for c in remote["cards"] if c.get("entity") == "input_number.narwal_drive_speed")
+    slider = next(c for c in cards if c.get("entity") == "input_number.narwal_drive_speed")
     assert slider["features"] == [{"type": "numeric-input", "style": "slider"}]
 
 
@@ -178,6 +208,7 @@ def test_drive_script_scales_by_speed_slider() -> None:
         assert step["data"][axis].startswith("{{ (" + axis)
 
 
-def test_vacuum_sections_without_remote_control_switch() -> None:
-    """Models with remote control disabled get only the robot section."""
-    assert len(vacuum_sections({}, "vacuum.n")) == 1
+def test_section_without_remote_control_switch() -> None:
+    """Models with remote control disabled get no remote-control cards."""
+    cards = narwal_section({}, "vacuum.n")["cards"]
+    assert not any(c.get("heading") == "Remote control" for c in cards)
