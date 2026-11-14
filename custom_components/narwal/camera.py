@@ -53,7 +53,7 @@ _PATH_ATTRIBUTE_TAIL_POINTS = 100
 
 # Map-card attributes change with every frame and are only useful live.
 _MAP_CARD_ATTRIBUTES = frozenset(
-    {"calibration_points", "vacuum_position", "charger", "path"}
+    {"calibration_points", "vacuum_position", "charger", "path", "rooms", "selected_rooms"}
 )
 
 async def async_setup_entry(
@@ -134,6 +134,10 @@ class NarwalMapCamera(NarwalEntity, Camera):
             MAP_OPTION_DEFAULTS[CONF_SHOW_FURNITURE_LABELS],
         )
         self._room_label_points: list[tuple[str, float, float]] = []
+        # Room centroids for tap-to-select map cards, in map grid coordinates.
+        self._room_points: list[dict[str, Any]] = []
+        # Rooms drawn highlighted in the cached base map (the rest are faded).
+        self._base_map_highlight: frozenset[int] = frozenset()
         self._map_attributes: dict[str, Any] = {}
 
     @property
@@ -143,9 +147,18 @@ class NarwalMapCamera(NarwalEntity, Camera):
         ``render_count`` changes with every frame so HA publishes it. The other
         keys describe the same frame for vacuum map cards: ``calibration_points``
         (grid to image pixels), ``vacuum_position`` ({x, y, a}), ``charger``
-        ({x, y}) and ``path`` (segments of [x, y]), all in map grid coordinates.
+        ({x, y}), ``path`` (segments of [x, y]) and ``rooms`` ([{id, name, x, y}],
+        each room's floor centroid), all in map grid coordinates, plus
+        ``selected_rooms``: the room ids picked for the next clean, in order.
         """
-        return {"render_count": self._render_count, **self._map_attributes}
+        attributes = {"render_count": self._render_count, **self._map_attributes}
+        if self._room_points:
+            attributes["rooms"] = self._room_points
+            static_map = self.coordinator.client.state.map_data
+            attributes["selected_rooms"] = (
+                list(self._selected_room_order(static_map)) if static_map else []
+            )
+        return attributes
 
     def _map_option(self, key: str) -> bool:
         """Return a persisted map display option."""
@@ -378,6 +391,34 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 attributes["path"] = capped[::-1]
         return attributes
 
+    def _selected_room_order(self, static_map) -> tuple[int, ...]:
+        """Rooms picked for the next start on this map, in cleaning order."""
+        coordinator = self.coordinator
+        if not coordinator.has_selected_clean_rooms():
+            return ()
+        chosen = [
+            room.room_id
+            for room in static_map.rooms
+            if room.room_id > 0 and coordinator.is_room_selected_for_clean(room.room_id)
+        ]
+        return tuple(coordinator.ordered_clean_room_ids_for(chosen))
+
+    @staticmethod
+    def _room_points_for(
+        static_map, centroids: dict[int, tuple[float, float]]
+    ) -> list[dict[str, Any]]:
+        """Return the ``rooms`` attribute: named rooms with their centroids."""
+        return [
+            {
+                "id": room.room_id,
+                "name": room.display_name,
+                "x": round(centroids[room.room_id][0], 1),
+                "y": round(centroids[room.room_id][1], 1),
+            }
+            for room in static_map.rooms
+            if room.room_id in centroids
+        ]
+
     @classmethod
     def _render_frame(
         cls,
@@ -497,6 +538,8 @@ class NarwalMapCamera(NarwalEntity, Camera):
             self._map_option(CONF_SHOW_FURNITURE_LABELS),
         )
         view_options_key = (self._map_rotation(), self._map_zoom())
+        # Picking rooms changes the labels and the highlight: render it now.
+        map_options_key = (map_options_key, self._selected_room_order(static_map))
         if display:
             new_key = (
                 static_ts,
@@ -531,9 +574,22 @@ class NarwalMapCamera(NarwalEntity, Camera):
             )
         )
 
+    async def _throttle_wait(self, delay: float) -> None:
+        """Wait out the render throttle, or less if a room pick or view option arrives.
+
+        A robot-position frame can start this wait just before a room is
+        tapped; the tap must not sit behind it.
+        """
+        wakeup = self._render_wakeup = asyncio.Event()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(wakeup.wait(), delay)
+
     def _schedule_render(self, display, new_key: tuple) -> None:
         """Queue the latest render request, coalescing while a render is active."""
         self._pending_render = (display, new_key)
+        wakeup = getattr(self, "_render_wakeup", None)
+        if wakeup is not None and self._render_options_changed(new_key):
+            wakeup.set()
         if self._render_task is not None and not self._render_task.done():
             return
         self._render_task = self.hass.async_create_task(self._async_render_pending())
@@ -554,7 +610,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
                     and since_render < _MIN_RENDER_INTERVAL
                     and not self._render_options_changed(new_key)
                 ):
-                    await asyncio.sleep(_MIN_RENDER_INTERVAL - since_render)
+                    await self._throttle_wait(_MIN_RENDER_INTERVAL - since_render)
                     if self._pending_render is not None:
                         display, new_key = self._pending_render
                         self._pending_render = None
@@ -572,10 +628,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
             self.async_write_ha_state()
             return
 
-        from .narwal_client.map_renderer import (
-            render_base_map,
-            room_label_points,
-        )
+        from .narwal_client.map_renderer import render_base_map, room_centroids
 
         # Rebuild base map only when static map data changes
         static_ts = static_map.created_at or 0
@@ -584,10 +637,13 @@ class NarwalMapCamera(NarwalEntity, Camera):
             self._map_option(CONF_SHOW_FURNITURE),
             self._map_option(CONF_SHOW_FURNITURE_LABELS),
         )
+        selection = self._selected_room_order(static_map)
+        highlight = frozenset(selection)
         if (
             self._base_map_image is None
             or static_ts != self._base_map_ts
             or map_options_key != self._base_map_options_key
+            or highlight != self._base_map_highlight
         ):
             room_names: dict[int, str] | None = None
             if map_options_key[0] and static_map.rooms:
@@ -609,17 +665,22 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 map_options_key[2],
                 False,
                 False,
+                highlight,
             )
             if base_img:
                 self._base_map_image = base_img
                 self._base_map_ts = static_ts
                 self._base_map_options_key = map_options_key
-                self._room_label_points = await self.hass.async_add_executor_job(
-                    room_label_points,
-                    static_map.compressed_map,
-                    static_map.width,
-                    static_map.height,
-                    room_names,
+                self._base_map_highlight = highlight
+                self._room_points = self._room_points_for(
+                    static_map,
+                    await self.hass.async_add_executor_job(
+                        room_centroids,
+                        static_map.compressed_map,
+                        static_map.width,
+                        static_map.height,
+                        {r.room_id for r in static_map.rooms if r.room_id > 0},
+                    ),
                 )
                 _LOGGER.info(
                     "Base map rendered (ts=%d, %dx%d)",
@@ -630,6 +691,15 @@ class NarwalMapCamera(NarwalEntity, Camera):
             else:
                 self.async_write_ha_state()
                 return
+
+        # Every room gets a label when labels are on; picked rooms always do,
+        # with their place in the cleaning order.
+        rank = {room_id: i + 1 for i, room_id in enumerate(selection)}
+        self._room_label_points = [
+            (p["name"], p["x"], p["y"], rank.get(p["id"]))
+            for p in self._room_points
+            if map_options_key[0] or p["id"] in rank
+        ]
 
         try:
             png_bytes, map_attributes = await self.hass.async_add_executor_job(

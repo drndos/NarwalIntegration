@@ -47,10 +47,11 @@ While driving, the vacuum entity reads *idle*, or *cleaning* while suction runs;
 
 ## Dashboard
 
-`tools/gen_dashboard.py` writes `narwal_vacuum_section.yaml`: a robot section (map, start /
-stop / return / locate, clean mode, suction) and a remote-control section with the switch,
-the suction select, a drive-speed slider (10–100 %, default 50) and a 3 x 3 drive pad that
-appears only while driving. Tap an arrow for a 1 s move, hold it for 3 s. Built-in cards only.
+`tools/gen_dashboard.py` writes `narwal_section.yaml`, one section with the map (tap rooms to
+pick them in cleaning order), start / stop / return / locate, clean mode, suction, then remote
+control: the switch, the suction select, a drive-speed slider (10–100 %, default 50) and a
+3 x 3 drive pad that appears only while driving. Tap an arrow for a 1 s move, hold it for 3 s.
+See [ROOM-CLEANING.md](ROOM-CLEANING.md#per-room-profiles-and-the-dashboard) for the map and clean settings.
 
 Dashboard buttons cannot use templates, so the pad calls `script.narwal_drive`, which scales
 the move by `input_number.narwal_drive_speed`. Add both from `narwal_drive_script.yaml` and

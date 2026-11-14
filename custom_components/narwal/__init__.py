@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from pathlib import Path
 from typing import TypeAlias
 
 import voluptuous as vol
@@ -593,10 +595,37 @@ def _async_register_services(hass: HomeAssistant) -> None:
         )
 
 
+MAP_CARD_FILE = Path(__file__).parent / "frontend" / "narwal-map-card.js"
+MAP_CARD_URL = "/narwal_static/narwal-map-card.js"
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up Narwal services."""
+    """Set up Narwal services and serve the map card."""
     _async_register_services(hass)
+    await _async_register_map_card(hass)
     return True
+
+
+async def _async_register_map_card(hass: HomeAssistant) -> None:
+    """Serve custom:narwal-map-card and load it on every dashboard.
+
+    The URL carries a content hash so browsers drop a cached old card after an
+    update. Skipped where HTTP or the frontend is not running (tests, safe mode).
+    """
+    if getattr(hass, "http", None) is None or "frontend" not in hass.config.components:
+        return
+    try:
+        from homeassistant.components.frontend import add_extra_js_url
+        from homeassistant.components.http import StaticPathConfig
+
+        content = await hass.async_add_executor_job(MAP_CARD_FILE.read_bytes)
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(MAP_CARD_URL, str(MAP_CARD_FILE), False)]
+        )
+        version = hashlib.sha256(content).hexdigest()[:8]
+        add_extra_js_url(hass, f"{MAP_CARD_URL}?v={version}")
+    except Exception:  # noqa: BLE001 - a missing card must not break the integration
+        _LOGGER.exception("Could not register the Narwal map card")
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:

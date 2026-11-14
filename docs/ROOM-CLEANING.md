@@ -51,12 +51,24 @@ on a 24-room map, which is right for automations and wrong for a dashboard. Room
 controls are disabled by default; selection switches stay enabled but hidden so a saved
 selection can never become an unreachable state.
 
-Enable the room profile entities you actually use, then run
-[`tools/gen_dashboard.py`](../tools/gen_dashboard.py) against your Home Assistant entity
-registry. It emits a **room-picker section**: one dropdown, and only the chosen room's controls
-on screen, plus a Whole-house panel for the defaults, Start / Clear-selection buttons, a
-`script` that cleans exactly one room with its own profile, and a Dock-tasks section. Paste the
-YAML into any sections-view dashboard. Needs the `state-switch` card from HACS.
+Run [`tools/gen_dashboard.py`](../tools/gen_dashboard.py) against your Home Assistant entity
+registry. It emits **one section** (`narwal_section.yaml`):
+
+- the map as `custom:narwal-map-card`, which the integration serves itself. Tap rooms in the
+  order to clean them, as in the Narwal app: each picked room's label shows 1, 2, 3 ... and the
+  other rooms fade. Tap a numbered room to drop it; the rest close up. **Clear** drops them
+  all. A tap only turns the room's *selected* switch on or off: picking a room puts it after the
+  rooms picked before it in the cleaning order, so **Start** cleans exactly what the map shows.
+  Rooms can't be changed while the robot is busy.
+- the vacuum commands with the six clean settings under them: clean mode, suction, water,
+  scrub, route and passes. With no room picked they are the whole-house defaults; while rooms
+  are picked they show the first picked room's profile, and a change applies to every picked
+  room, as in the app. Water and scrub only apply to mopping modes, suction to vacuuming ones.
+- remote control.
+
+A Dock-tasks section is written separately. Paste the YAML into any sections-view dashboard.
+Apart from the map card, which the integration serves, every card is built in. The per-room
+profile selects still exist (disabled by default) for automations.
 
 ## `narwal.clean_rooms`
 

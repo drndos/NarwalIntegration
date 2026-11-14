@@ -255,3 +255,56 @@ async def test_number_setup_adds_one_order_entity_per_room() -> None:
 
     assert sum(isinstance(entity, NarwalPassesNumber) for entity in added) == 1
     assert sum(isinstance(entity, NarwalRoomOrderNumber) for entity in added) == 3
+
+
+def test_picking_rooms_one_by_one_sets_their_order() -> None:
+    """A newly picked room goes after the rooms picked before it."""
+    coordinator = _coordinator()
+    coordinator._schedule_room_selection_save = MagicMock()
+    coordinator.room_clean_orders = {"100": [4, 5, 6]}
+
+    coordinator.set_room_selected_for_clean(6, True, map_id="100")
+    coordinator.set_room_selected_for_clean(4, True, map_id="100")
+    assert coordinator.selected_clean_room_ids_for([4, 5, 6], map_id="100") == [6, 4]
+
+    # Dropping one closes up; picking another appends it at the end.
+    coordinator.set_room_selected_for_clean(6, False, map_id="100")
+    coordinator.set_room_selected_for_clean(5, True, map_id="100")
+    coordinator.set_room_selected_for_clean(6, True, map_id="100")
+    assert coordinator.selected_clean_room_ids_for([4, 5, 6], map_id="100") == [4, 5, 6]
+
+    # Re-picking a picked room does not move it.
+    coordinator.set_room_selected_for_clean(4, True, map_id="100")
+    assert coordinator.selected_clean_room_ids_for([4, 5, 6], map_id="100") == [4, 5, 6]
+
+
+async def test_clean_settings_edit_the_picked_rooms() -> None:
+    """With rooms picked the device-level selects show and set their profiles."""
+    from custom_components.narwal.select import (
+        LEGACY_SELECT_DESCRIPTIONS,
+        LegacyNarwalSettingSelect,
+    )
+
+    coordinator = _coordinator()
+    coordinator._schedule_room_selection_save = MagicMock()
+    descs = {d.setting_key: d for d in LEGACY_SELECT_DESCRIPTIONS}
+    route = LegacyNarwalSettingSelect(coordinator, descs["route"])
+    route.async_write_ha_state = MagicMock()
+    passes = LegacyNarwalSettingSelect(coordinator, descs["passes"])
+    passes.async_write_ha_state = MagicMock()
+
+    coordinator.set_room_selected_for_clean(5, True, map_id="100")
+    coordinator.set_room_selected_for_clean(6, True, map_id="100")
+    assert route.available and passes.available
+
+    await route.async_select_option("Meticulous")
+    await passes.async_select_option("2")
+
+    for room_id in (5, 6):
+        settings = coordinator.effective_room_clean_settings_for(room_id, map_id="100")
+        assert route.current_option == "Meticulous"
+        assert int(settings.route) == int(route._value_for("Meticulous"))
+        assert settings.passes == 2
+    # The unpicked room and the whole-house defaults are untouched.
+    assert coordinator.effective_room_clean_settings_for(4, map_id="100").passes != 2
+    assert coordinator.clean_settings.passes != 2

@@ -164,6 +164,15 @@ LEGACY_ROUTE_MAP: dict[str, CleaningRoute] = {
 LEGACY_MOP_MODES = {"Mop", "Vacuum then mop", "Vacuum and mop"}
 LEGACY_VACUUM_MODES = {"Vacuum", "Vacuum then mop", "Vacuum and mop"}
 LEGACY_START_ONLY_SETTINGS = {"mode", "passes", "route", "scrub"}
+# The room-profile attribute each legacy (dashboard) setting edits.
+LEGACY_ROOM_ATTRS = {
+    "mode": "work_mode",
+    "suction": "fan",
+    "water": "water",
+    "scrub": "mop_strength",
+    "route": "route",
+    "passes": "passes",
+}
 START_ONLY_CLEAN_SETTING_ATTRS = {"work_mode", "mop_strength"}
 
 
@@ -935,13 +944,39 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         """Return the current selected option."""
         return self._option_from_settings()
 
+    def _picked_rooms(self) -> list[int]:
+        """Rooms picked for the next clean on the current map, in cleaning order.
+
+        While rooms are picked these settings edit those rooms' profiles, as
+        the Narwal app does, instead of the whole-house defaults.
+        """
+        coordinator = self.coordinator
+        if getattr(coordinator, "_room_profile_store_loaded", True) is False:
+            return []
+        if not coordinator.has_selected_clean_rooms():
+            return []
+        map_data = getattr(coordinator.data, "map_data", None)
+        rooms = getattr(map_data, "rooms", None)
+        if not isinstance(rooms, (list, tuple)):
+            return []
+        room_ids = [room.room_id for room in rooms if room.room_id > 0]
+        return list(coordinator.selected_clean_room_ids_for(room_ids))
+
+    def _picked_room_value(self, key: str):
+        """Return the first picked room's value for a setting, or None."""
+        picked = self._picked_rooms()
+        if not picked:
+            return None
+        settings = self.coordinator.effective_room_clean_settings_for(picked[0])
+        return getattr(settings, LEGACY_ROOM_ATTRS[key])
+
     @property
     def _selected_mode(self) -> str:
         """Return the selected legacy clean mode."""
-        return (
-            LEGACY_MODE_LABELS.get(self.coordinator.clean_settings.work_mode)
-            or "Vacuum and mop"
-        )
+        mode = self._picked_room_value("mode")
+        if mode is None:
+            mode = self.coordinator.clean_settings.work_mode
+        return LEGACY_MODE_LABELS.get(mode) or "Vacuum and mop"
 
     def _mode_for_applicability(self, *, live: bool = False) -> str | None:
         """Return the mode label used for pending or live setting applicability."""
@@ -972,9 +1007,8 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         """Return whether this setting is currently meaningful and actionable."""
         key = self.entity_description.setting_key
         state = self.coordinator.data
-        setup_available = (
-            can_edit_pending_clean_settings(state)
-            and not self.coordinator.has_selected_clean_rooms()
+        setup_available = can_edit_pending_clean_settings(state) and (
+            not self.coordinator.has_selected_clean_rooms() or bool(self._picked_rooms())
         )
         live_available = super().available and is_live_clean_setting_available(state)
         setup_applies = self._setting_applies_to_mode(key)
@@ -985,6 +1019,21 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             (setup_available and setup_applies)
             or (live_available and live_applies)
         )
+
+    def _value_for(self, option: str):
+        """Return the clean-setting value of an option."""
+        key = self.entity_description.setting_key
+        if key == "mode":
+            return LEGACY_MODE_MAP[option]
+        if key == "suction":
+            return self._suction_map[option]
+        if key == "water":
+            return LEGACY_WATER_MAP[option]
+        if key == "scrub":
+            return LEGACY_SCRUB_MAP[option]
+        if key == "route":
+            return LEGACY_ROUTE_MAP[option]
+        return int(option)
 
     def _apply_option(self, option: str) -> None:
         """Store a legacy option and mirror it into clean settings."""
@@ -1070,6 +1119,10 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         """Return this legacy option from the shared clean settings."""
         key = self.entity_description.setting_key
         settings = self.coordinator.clean_settings
+        if not self._is_cleaning_or_paused:
+            picked_value = self._picked_room_value(key)
+            if picked_value is not None:
+                return self._label_for(key, picked_value)
         if key == "mode":
             option = LEGACY_MODE_LABELS.get(settings.work_mode)
         elif key == "suction":
@@ -1098,6 +1151,22 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             option = None
         return self._normalise_option(option or "") or self.entity_description.default_option
 
+    def _label_for(self, key: str, value) -> str | None:
+        """Return the option label of a clean-setting value."""
+        if key == "mode":
+            option = LEGACY_MODE_LABELS.get(value)
+        elif key == "suction":
+            option = self._suction_labels.get(value)
+        elif key == "water":
+            option = {v: label for label, v in LEGACY_WATER_MAP.items()}.get(value)
+        elif key == "scrub":
+            option = {v: label for label, v in LEGACY_SCRUB_MAP.items()}.get(value)
+        elif key == "route":
+            option = {v: label for label, v in LEGACY_ROUTE_MAP.items()}.get(value)
+        else:
+            option = str(value)
+        return self._normalise_option(option or "") or self.entity_description.default_option
+
     def _normalise_option(self, option: str) -> str | None:
         """Return a current option, accepting old hidden suction aliases."""
         if option in self.options:
@@ -1117,9 +1186,9 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         key = self.entity_description.setting_key
         state = self.coordinator.data
         has_selected_rooms = self.coordinator.has_selected_clean_rooms()
-        setup_available = (
-            can_edit_pending_clean_settings(state)
-            and not has_selected_rooms
+        picked = self._picked_rooms() if has_selected_rooms else []
+        setup_available = can_edit_pending_clean_settings(state) and (
+            not has_selected_rooms or bool(picked)
         )
         live_available = super().available and is_live_clean_setting_available(state)
         setup_applies = self._setting_applies_to_mode(key)
@@ -1172,7 +1241,13 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             attr = "fan" if key == "suction" else "water"
             self.coordinator.set_active_clean_setting(attr, live_value)
 
-        if not has_selected_rooms:
+        if picked and setup_available:
+            value = self._value_for(option)
+            for room_id in picked:
+                self.coordinator.set_room_clean_setting(
+                    room_id, LEGACY_ROOM_ATTRS[key], value
+                )
+        elif not has_selected_rooms:
             self._apply_option(option)
         self.async_write_ha_state()
         self.coordinator.async_update_listeners()

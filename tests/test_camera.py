@@ -48,6 +48,7 @@ def _camera(state: NarwalState) -> NarwalMapCamera:
     camera._base_map_ts = 0
     camera._base_map_options_key = (True, True, True)
     camera._room_label_points = []
+    camera._room_points = []
     camera._map_attributes = {}
     return camera
 
@@ -214,7 +215,7 @@ def test_handle_update_replaces_pending_render_when_state_returns_to_cache() -> 
     camera = _camera(state)
     cached_key = (
         123,
-        (True, False, False),
+        ((True, False, False), ()),
         (0, 1.0),
         4.0,
         6.0,
@@ -255,8 +256,9 @@ async def test_render_pending_delays_throttled_native_update() -> None:
 
     with (
         patch("custom_components.narwal.camera.time.monotonic", return_value=101.0),
-        patch(
-            "custom_components.narwal.camera.asyncio.sleep",
+        patch.object(
+            camera,
+            "_throttle_wait",
             new_callable=AsyncMock,
             side_effect=queue_latest,
         ) as sleep,
@@ -313,6 +315,8 @@ async def test_render_keeps_camera_access_token_stable() -> None:
             return _BaseImage(300, 300)
         if getattr(fn, "__name__", "") == "room_label_points":
             return []
+        if getattr(fn, "__name__", "") == "room_centroids":
+            return {}
         if getattr(fn, "__name__", "") == "_render_frame":
             return fn(*args)
         return b"png"
@@ -456,6 +460,8 @@ async def test_attribute_failure_keeps_the_rendered_frame() -> None:
             return _BaseImage(300, 240)
         if getattr(fn, "__name__", "") == "room_label_points":
             return []
+        if getattr(fn, "__name__", "") == "room_centroids":
+            return {}
         if getattr(fn, "__name__", "") == "_render_frame":
             return fn(*args)
         return b"png"
@@ -512,3 +518,25 @@ def test_lost_map_clears_the_map_card_attributes() -> None:
     camera._handle_coordinator_update()
 
     assert camera.extra_state_attributes == {"render_count": 0}
+
+
+async def test_room_pick_cuts_the_render_throttle_short() -> None:
+    """A selection change during the throttle wait renders at once."""
+    camera = _camera(NarwalState())
+    camera._cache_key = (1, ((True, True, True), ()), (0, 1.0), 1.0)
+    camera.hass.async_create_task = MagicMock()
+    camera._render_task = MagicMock()
+    camera._render_task.done.return_value = False
+
+    waiting = asyncio.ensure_future(camera._throttle_wait(5.0))
+    await asyncio.sleep(0)
+    camera._schedule_render(None, (1, ((True, True, True), (4,)), (0, 1.0), 1.0))
+    await asyncio.wait_for(waiting, 1.0)
+
+    # A plain robot-position frame does not cut it short.
+    waiting = asyncio.ensure_future(camera._throttle_wait(0.2))
+    await asyncio.sleep(0)
+    camera._schedule_render(None, (1, ((True, True, True), ()), (0, 1.0), 2.0))
+    await asyncio.sleep(0.05)
+    assert not waiting.done()
+    await waiting

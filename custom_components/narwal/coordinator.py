@@ -866,6 +866,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self._resolve_identified_room_state(map_key)
         selected_rooms = self.selected_clean_rooms.setdefault(map_key, set())
         if selected:
+            if room_id not in selected_rooms:
+                self._append_to_clean_order(room_id, set(selected_rooms), map_key)
             selected_rooms.add(room_id)
         else:
             selected_rooms.discard(room_id)
@@ -873,6 +875,29 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 self.selected_clean_rooms.pop(map_key, None)
         self._room_selection_dirty_maps.add(map_key)
         self._schedule_room_selection_save()
+
+    def _append_to_clean_order(
+        self,
+        room_id: int,
+        already_selected: set[int],
+        map_key: str | None,
+    ) -> None:
+        """Clean a newly picked room after the rooms picked before it.
+
+        Picking rooms one by one (the map card, the app) then sets the order
+        too, in one step. The picked rooms take the front of the saved order,
+        keeping their relative order; the rest keep theirs behind them.
+        """
+        if map_key is None or not getattr(self, "_room_order_store_loaded", False):
+            return
+        saved = self.room_clean_orders.get(map_key, [])
+        picked = [rid for rid in saved if rid in already_selected]
+        picked += sorted(already_selected - set(picked))
+        rest = [rid for rid in saved if rid not in already_selected and rid != room_id]
+        new_order = [*picked, room_id, *rest]
+        if new_order != saved:
+            self.room_clean_orders[map_key] = new_order
+            self._schedule_room_order_save()
 
     def _resolve_identified_room_state(self, map_id: str) -> None:
         """Resolve unidentified state and persist the newly known map key."""
