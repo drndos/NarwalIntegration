@@ -19,12 +19,19 @@ Outputs, all plain YAML you paste into your own dashboard / config:
 
 - ``narwal_rooms_section.yaml``  — a sections-view grid: picker + per-room panel
 - ``narwal_dock_section.yaml``   — a grid with the five dock task switches
+- ``narwal_vacuum_section.yaml`` — two grids: the robot (map, commands, clean
+  settings) and remote control (on/off, suction, speed slider, a 3 x 3 drive
+  pad shown only while driving)
+- ``narwal_drive_input_number.yaml`` / ``narwal_drive_script.yaml`` — the
+  speed slider's ``input_number`` and ``script.narwal_drive``, which scales
+  each pad move by it (dashboard actions cannot template)
 - ``narwal_input_select.yaml``   — the ``input_select`` helper the picker uses
 - ``narwal_script.yaml``         — ``script.narwal_clean_room``: select one
   room and start, so a room's own profile is used (``narwal.clean_rooms``
   deliberately takes explicit settings and ignores profiles)
 
-Requires the ``state-switch`` custom card (HACS: lovelace-state-switch).
+The rooms section requires the ``state-switch`` custom card (HACS:
+lovelace-state-switch); the vacuum and dock sections use built-in cards only.
 """
 
 from __future__ import annotations
@@ -54,6 +61,40 @@ DOCK_SUFFIXES = {
     "_dry_dust_bin": "Dry dust bin",
     "_dry_dock_bag": "Dry dock bag",
 }
+# Device-level entities, keyed by the part of the unique_id after the device id.
+VACUUM_KEYS = {
+    "battery": "sensor",
+    "charging_state": "sensor",
+    "error": "binary_sensor",
+    "map": "camera",
+    "work_mode": "select",
+    "runtime_suction": "select",
+    "cleaning_area": "sensor",
+    "cleaning_time": "sensor",
+    "remaining_time": "sensor",
+    "remote_control": "switch",
+    "remote_control_suction": "select",
+    "suction_cooldown": "sensor",
+    "remote_control_suction_running": "binary_sensor",
+}
+# Drive pad, row by row: (name, icon, linear %, angular %) at full speed;
+# + forward, + left. script.narwal_drive scales both by the speed slider, so
+# the default 50 % gives forward 50, turn 40.
+DRIVE_PAD = (
+    ("Forward left", "mdi:arrow-top-left", 80, 70),
+    ("Forward", "mdi:arrow-up-bold", 100, 0),
+    ("Forward right", "mdi:arrow-top-right", 80, -70),
+    ("Turn left", "mdi:rotate-left", 0, 80),
+    ("Hold still", "mdi:stop-circle-outline", 0, 0),
+    ("Turn right", "mdi:rotate-right", 0, -80),
+    ("Back left", "mdi:arrow-bottom-left", -70, 60),
+    ("Back", "mdi:arrow-down-bold", -80, 0),
+    ("Back right", "mdi:arrow-bottom-right", -70, -60),
+)
+DRIVE_SPEED = "input_number.narwal_drive_speed"
+DRIVE_SCRIPT = "script.narwal_drive"
+DRIVE_TAP_SECONDS = 1.0
+DRIVE_HOLD_SECONDS = 3.0
 LABELS = {
     "mode": "Mode",
     "suction": "Suction",
@@ -111,6 +152,19 @@ def collect(entries: list[dict], map_id: str | None):
         sys.exit(f"registry holds rooms for several maps {sorted(maps)}; pass --map-id")
     complete = {rid: r for rid, r in rooms.items() if "selected" in r["entities"]}
     return dict(sorted(complete.items(), key=lambda kv: kv[1]["name"].lower())), globals_, dock
+
+
+def collect_vacuum(entries: list[dict]) -> dict[str, str]:
+    """Device-level entities by key; disabled ones are left out."""
+    found: dict[str, str] = {}
+    for e in entries:
+        uid, eid = e["unique_id"], e["entity_id"]
+        if "_" not in uid or e.get("disabled_by") is not None:
+            continue
+        key = uid.split("_", 1)[1]  # device ids are hex, no underscores
+        if VACUUM_KEYS.get(key) == eid.split(".", 1)[0]:
+            found[key] = eid
+    return found
 
 
 def tile(entity: str, name: str, feature: str | None = None, **extra) -> dict:
@@ -225,6 +279,151 @@ def dock_section(dock) -> dict:
     }
 
 
+def _when(entity: str, state: str, *, negate: bool = False) -> list[dict]:
+    return [{"condition": "state", "entity": entity, "state_not" if negate else "state": state}]
+
+
+def _full(card: dict) -> dict:
+    return {**card, "features_position": "inline", "grid_options": {"columns": 12}}
+
+
+def robot_section(ents: dict[str, str], vacuum: str) -> dict:
+    """Map, native commands, live status and the two clean settings used most."""
+    badges = [
+        {"type": "entity", "entity": ents[key], "show_icon": True, "show_state": True}
+        for key in ("battery", "charging_state")
+        if key in ents
+    ]
+    if "error" in ents:
+        badges.append({"type": "entity", "entity": ents["error"], "color": "red",
+                       "visibility": _when(ents["error"], "on")})
+    cards: list[dict] = [{"type": "heading", "heading": "Narwal", "icon": "mdi:robot-vacuum", "badges": badges}]
+    if "map" in ents:
+        cards.append({"type": "picture-entity", "entity": ents["map"], "camera_view": "auto",
+                      "show_name": False, "show_state": False})
+    cards.append({
+        "type": "tile", "entity": vacuum, "name": "Vacuum",
+        "state_content": ["state", "status_summary"],
+        "features": [{"type": "vacuum-commands",
+                      "commands": ["start_pause", "stop", "return_home", "locate"]}],
+        "features_position": "bottom",
+        "grid_options": {"columns": 12},
+    })
+    for key, name, icon in (("work_mode", "Clean mode", "mdi:broom"), ("runtime_suction", "Suction", "mdi:fan")):
+        if key in ents:
+            cards.append(_full(tile(ents[key], name, "select-options", icon=icon)))
+    for key, name in (("cleaning_area", "Area"), ("cleaning_time", "Time"), ("remaining_time", "Left")):
+        if key in ents:
+            cards.append({**tile(ents[key], name), "vertical": True,
+                          "grid_options": {"columns": 4}, "visibility": _when(vacuum, "cleaning")})
+    return {"type": "grid", "cards": cards}
+
+
+def drive_button(name: str, icon: str, linear: int, angular: int, vacuum: str) -> dict:
+    def move(seconds: float) -> dict:
+        if not (linear or angular):
+            # Stop now; no speed to scale.
+            return {
+                "action": "perform-action",
+                "perform_action": "narwal.remote_control_move",
+                "target": {"entity_id": vacuum},
+                "data": {"linear": 0, "angular": 0, "duration": 0},
+            }
+        return {
+            "action": "perform-action",
+            "perform_action": DRIVE_SCRIPT,
+            "data": {"linear": linear, "angular": angular, "duration": seconds},
+        }
+
+    return {
+        "type": "button", "name": name, "icon": icon, "show_name": False, "show_state": False,
+        "tap_action": move(DRIVE_TAP_SECONDS),
+        "hold_action": move(DRIVE_HOLD_SECONDS),
+        "grid_options": {"columns": 4, "rows": 1},
+    }
+
+
+def remote_section(ents: dict[str, str], vacuum: str) -> dict | None:
+    """Remote control: on/off, suction, and a drive pad shown only while driving."""
+    switch = ents.get("remote_control")
+    if switch is None:
+        return None
+    cards: list[dict] = [
+        {"type": "heading", "heading": "Remote control", "icon": "mdi:gamepad-variant"},
+        _full(tile(switch, "Remote control", "toggle", icon="mdi:gamepad-variant")),
+    ]
+    if "remote_control_suction" in ents:
+        cards.append(_full(tile(ents["remote_control_suction"], "Suction while driving", "select-options", icon="mdi:fan")))
+    cards.append({
+        **_full(tile(DRIVE_SPEED, "Drive speed", icon="mdi:speedometer")),
+        "features": [{"type": "numeric-input", "style": "slider"}],
+    })
+    cards.append({
+        "type": "markdown",
+        "content": (
+            f"Turn on remote control to drive. Tap an arrow for a {DRIVE_TAP_SECONDS:g} s nudge, "
+            f"hold it for {DRIVE_HOLD_SECONDS:g} s. Manual drive ends after 30 s without a move "
+            "and the robot stays where it is: send it home with the return button above."
+        ),
+        "visibility": _when(switch, "on", negate=True),
+    })
+    cards += [{**drive_button(*pad, vacuum), "visibility": _when(switch, "on")} for pad in DRIVE_PAD]
+    for key, name in (("suction_cooldown", "Suction cool-down"), ("remote_control_suction_running", "Suction running")):
+        if key in ents:
+            cards.append({**tile(ents[key], name), "grid_options": {"columns": 6}, "visibility": _when(switch, "on")})
+    return {"type": "grid", "cards": cards}
+
+
+def drive_speed_config() -> dict:
+    """input_number helper behind the drive-speed slider."""
+    return {
+        DRIVE_SPEED.split(".", 1)[1]: {
+            "name": "Narwal drive speed", "icon": "mdi:speedometer",
+            "min": 10, "max": 100, "step": 10, "initial": 50,
+            "unit_of_measurement": "%", "mode": "slider",
+        }
+    }
+
+
+def drive_script_config(vacuum: str) -> dict:
+    """script.narwal_drive: one pad move scaled by the drive-speed slider."""
+    def scaled(field: str) -> str:
+        return (
+            f"{{{{ ({field} | float(0) * states('{DRIVE_SPEED}') | float(50) / 100)"
+            " | round(0) | int }}"
+        )
+
+    def field(name: str) -> dict:  # fresh dicts: shared ones dump as YAML anchors
+        return {"name": name, "required": True, "selector": {"number": {"min": -100, "max": 100}}}
+
+    return {
+        DRIVE_SCRIPT.split(".", 1)[1]: {
+            "alias": "Narwal: drive",
+            "description": "Remote-control move scaled by the drive-speed slider.",
+            "icon": "mdi:gamepad-variant",
+            # A new tap replaces the move in flight.
+            "mode": "restart",
+            "fields": {
+                "linear": field("Linear at full speed"),
+                "angular": field("Turn at full speed"),
+                "duration": {"name": "Duration", "default": DRIVE_TAP_SECONDS,
+                             "selector": {"number": {"min": 0, "max": 5, "step": 0.1}}},
+            },
+            "sequence": [{
+                "action": "narwal.remote_control_move",
+                "target": {"entity_id": vacuum},
+                "data": {"linear": scaled("linear"), "angular": scaled("angular"),
+                         "duration": "{{ duration | float(1) }}"},
+            }],
+        }
+    }
+
+
+def vacuum_sections(ents: dict[str, str], vacuum: str) -> list[dict]:
+    remote = remote_section(ents, vacuum)
+    return [robot_section(ents, vacuum), *([remote] if remote else [])]
+
+
 def input_select_config(rooms, name: str) -> dict:
     return {"name": name, "icon": "mdi:floor-plan", "options": [WHOLE_HOUSE, *[r["name"] for r in rooms.values()]]}
 
@@ -268,7 +467,20 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("build"))
     args = parser.parse_args()
 
-    rooms, globals_, dock = collect(load_registry(args.registry), args.map_id)
+    entries = load_registry(args.registry)
+    args.out.mkdir(parents=True, exist_ok=True)
+    vacuum_ents = collect_vacuum(entries)
+    (args.out / "narwal_vacuum_section.yaml").write_text(
+        dump(vacuum_sections(vacuum_ents, args.vacuum)), encoding="utf-8"
+    )
+    if "remote_control" in vacuum_ents:
+        (args.out / "narwal_drive_input_number.yaml").write_text(dump(drive_speed_config()), encoding="utf-8")
+        (args.out / "narwal_drive_script.yaml").write_text(
+            dump(drive_script_config(args.vacuum)), encoding="utf-8"
+        )
+    print(f"vacuum + remote control: {len(vacuum_ents)} entities -> {args.out}/narwal_vacuum_section.yaml")
+
+    rooms, globals_, dock = collect(entries, args.map_id)
     if not rooms:
         sys.exit(
             "no enabled room controls found; enable the Narwal room entities "

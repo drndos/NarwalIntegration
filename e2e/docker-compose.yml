@@ -1,0 +1,23 @@
+# Throwaway Home Assistant for end-to-end tests against a real robot.
+# Driven by e2e/run_e2e.py; see e2e/README.md.
+services:
+  homeassistant:
+    container_name: narwal-e2e-ha
+    image: ghcr.io/home-assistant/home-assistant:${HA_VERSION:-stable}
+    ports:
+      - "${HA_PORT:-8124}:8123"
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./.ha-config:/config
+      # The integration under test, straight from the working tree.
+      - ../custom_components/narwal:/config/custom_components/narwal:ro
+    restart: "no"
+
+# Pinned: Docker's automatic pick (e.g. 192.168.16.0/20) can swallow the robot's
+# LAN, and the container then cannot reach it. Override if this one clashes.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${E2E_SUBNET:-10.254.90.0/24}

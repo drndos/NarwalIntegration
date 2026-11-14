@@ -66,3 +66,6 @@ run_analysis*.py
 prompt.md
 .planning.bak-*/
 .claude.bak-*/
+
+# Throwaway HA used by e2e/run_e2e.py
+e2e/.ha-config/

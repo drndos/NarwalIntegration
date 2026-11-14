@@ -979,6 +979,10 @@ class NarwalState:
     manual_control_mode: int | None = None
     remote_control_suction_running: bool = False
     fan_cooldown_seconds: int = 0
+    # True from manual drive (21) until the robot reports a state other than
+    # 21, 19, standby or unknown. Leaving manual drive away from the dock, the
+    # Flow 2 reports 19 (TASK_COMPLETED) and sits still; it does not head home.
+    after_remote_control: bool = False
 
     # Current room being cleaned (working_status field 6, confirmed 2026-04-24).
     # room_id of the room the robot is actively cleaning right now.
@@ -1027,6 +1031,20 @@ class NarwalState:
     def is_remote_control(self) -> bool:
         """True while the robot is in manual drive (working status 21)."""
         return self.working_status == WorkingStatus.REMOTE_CONTROL
+
+    @property
+    def is_idle_after_remote_control(self) -> bool:
+        """True when manual drive ended away from the dock and the robot sits still.
+
+        Live-validated on a Flow 2 (fw 01.10.30.02): after manual drive it
+        reports 19 with dock fields 11 = 1 / 47 = 2 and stays put
+        indefinitely. A recall is accepted and docks it.
+        """
+        return (
+            self.after_remote_control
+            and self.working_status == WorkingStatus.TASK_COMPLETED
+            and self.has_explicit_off_dock_signal
+        )
 
     @property
     def is_cleaning(self) -> bool:
@@ -1192,7 +1210,16 @@ class NarwalState:
         Only valid while working_status is CLEANING — once the robot
         transitions to STANDBY/DOCKED/CHARGED, it has already docked
         even if field 3.7 is momentarily still set.
+
+        Exception, live-validated on a Flow 2 (fw 01.10.30.02) recalled from
+        idle: it reported {1=10, 10=2} with dock fields 11 = 1 / 47 = 2 all
+        the way home, then 11 = 2 / 47 = 3 once seated. Status 10 with an
+        explicit off-dock signal and 3.10 = 2 is a return in progress.
         """
+        if self.working_status == WorkingStatus.DOCKED:
+            return self.dock_sub_state == 2 and (
+                self.dock_field11 == 1 or self.dock_field47 == 2
+            )
         if self.working_status not in ACTIVE_CLEANING_STATUSES:
             return False
         return self.is_returning_to_dock and self.dock_sub_state == 2
@@ -1946,6 +1973,14 @@ class NarwalState:
                     )
                     next_working_status = WorkingStatus.UNKNOWN
                 self.working_status = next_working_status
+                if next_working_status == WorkingStatus.REMOTE_CONTROL:
+                    self.after_remote_control = True
+                elif next_working_status not in (
+                    WorkingStatus.TASK_COMPLETED,
+                    WorkingStatus.STANDBY,
+                    WorkingStatus.UNKNOWN,
+                ):
+                    self.after_remote_control = False
                 terminal_robot = self.working_status in {
                     WorkingStatus.TASK_COMPLETED,
                     WorkingStatus.ERROR,

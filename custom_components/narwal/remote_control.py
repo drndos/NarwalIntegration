@@ -71,7 +71,14 @@ async def async_start_remote_control(
             # The wake burst carries notify_app_event, which is harmless
             # before remote control starts and fatal during it.
             await client.wake(timeout=10.0)
-        resp = await client.remote_control_start(mode)
+        try:
+            resp = await client.remote_control_start(mode)
+        except NarwalCommandError:
+            # robot_awake lags a robot that dozed off (stale-broadcast window):
+            # the first start after a long idle went unanswered on a Flow 2,
+            # the second worked. Wake it and try once more.
+            await client.wake(timeout=10.0)
+            resp = await client.remote_control_start(mode)
     except (NarwalCommandError, NarwalConnectionError) as err:
         raise HomeAssistantError(f"Narwal remote control failed: {err}") from err
     if resp.result_code == CommandResult.NOT_APPLICABLE and not client.remote_control_active:

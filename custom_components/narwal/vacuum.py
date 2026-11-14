@@ -115,6 +115,8 @@ def _task_status(state: Any) -> str:
         return "remapping"
     if state.working_status == WorkingStatus.REMOTE_CONTROL:
         return "remote_control"
+    if state.is_idle_after_remote_control:
+        return "idle"
     if state.is_returning or (
         state.working_status == WorkingStatus.TASK_COMPLETED
         and not state.has_current_dock_presence_signal
@@ -426,6 +428,8 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if state.working_status == WorkingStatus.REMOTE_CONTROL:
             if state.remote_control_suction_running:
                 return VacuumActivity.CLEANING
+            return VacuumActivity.IDLE
+        if state.is_idle_after_remote_control:
             return VacuumActivity.IDLE
         if _is_dock_side(state):
             return VacuumActivity.DOCKED

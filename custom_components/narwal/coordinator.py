@@ -407,6 +407,11 @@ def can_return_home(state: NarwalState | None) -> bool:
     """Return True when the robot can be recalled to the dock."""
     if has_blocking_error(state):
         return False
+    if state.is_idle_after_remote_control:
+        # Sits still after manual drive. Live on a Flow 2, a recall was
+        # accepted and docked it while the station reported drying (3.18 = 4),
+        # so dock work does not block it here.
+        return True
     return (
         not state.is_docked
         and state.working_status != WorkingStatus.TASK_COMPLETED
