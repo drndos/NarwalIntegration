@@ -115,6 +115,9 @@ _STALE_DOCK_BASE_STATUSES = {
 }
 
 _DOCK_TASK_REFRESH_DELAY = 6.0
+# Close reason the robot sends to the older socket when a second client
+# connects from the same source IP.
+_SAME_IP_CLOSE_REASON = "connection with same ip"
 _DOCK_TASK_IDENTIFY_ATTEMPTS = 4
 _DOCK_TASK_IDENTIFY_DELAY = 1.5
 _DOCK_TASK_FORCE_END_PAYLOADS = {
@@ -739,7 +742,15 @@ class NarwalClient:
             except NarwalConnectionError as e:
                 _LOGGER.warning("Connection failed: %s", e)
             except websockets.exceptions.ConnectionClosed as e:
-                _LOGGER.warning("Connection closed: %s", e)
+                if _SAME_IP_CLOSE_REASON in (e.rcvd.reason if e.rcvd else ""):
+                    _LOGGER.warning(
+                        "Connection closed by the robot: another client connected "
+                        "from this host's IP (the robot allows one connection per "
+                        "IP and drops the older one). Stop the other client to "
+                        "avoid a reconnect tug-of-war"
+                    )
+                else:
+                    _LOGGER.warning("Connection closed: %s", e)
             except asyncio.CancelledError:
                 _LOGGER.debug("Listener cancelled")
                 return

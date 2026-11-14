@@ -35,7 +35,7 @@ the robot's design, not this integration's. Treat port 9002 the way you'd treat 
 unauthenticated LAN device and segment your network accordingly.
 
 **The robot accepts one connection per IP.** A second connection from the same address is
-refused with `connection with same ip, close old one`. In practice this means you must disable
+accepted and the *older* one is closed with reason `connection with same ip, close old one`. In practice this means you must disable
 the Home Assistant config entry before running a diagnostic script from the same host.
 
 The robot also disconnects on a malformed frame — specifically on a mismatched header byte
