@@ -29,6 +29,12 @@ from .const import (
     RECONNECT_BACKOFF_FACTOR,
     RECONNECT_INITIAL_DELAY,
     RECONNECT_MAX_DELAY,
+    REMOTE_CONTROL_IDLE_TIMEOUT,
+    REMOTE_CONTROL_MAX_MOVE,
+    REMOTE_CONTROL_MODE_RETRY,
+    REMOTE_CONTROL_STREAM_INTERVAL,
+    REMOTE_CONTROL_SUCTION_MODES,
+    REMOTE_CONTROL_SUCTION_RESEND,
     TOPIC_CMD_ACTIVE_ROBOT,
     TOPIC_CMD_AMBIENT_LIGHT_CTRL,
     TOPIC_CMD_APP_HEARTBEAT,
@@ -54,8 +60,10 @@ from .const import (
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_LED,
+    TOPIC_CMD_SET_MANUAL_CONTROL_MODE,
     TOPIC_CMD_SET_MOP_HUMIDITY,
     TOPIC_CMD_TAKE_PICTURE,
+    TOPIC_CMD_VELOCITY_CONTROL,
     TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
@@ -66,6 +74,7 @@ from .const import (
     CleaningRoute,
     CommandResult,
     FanLevel,
+    ManualControlMode,
     MopHumidity,
     MopStrengthLevel,
     WorkingStatus,
@@ -383,6 +392,17 @@ class NarwalClient:
         self._dock_task_lock = self._action_lock
         self._robot_start_lock = self._action_lock
 
+        # Remote control (manual drive) session; see remote_control_start().
+        self._rc_task: asyncio.Task[None] | None = None
+        self._rc_mode_task: asyncio.Task[None] | None = None
+        self._rc_mode: ManualControlMode = ManualControlMode.OFF
+        self._rc_linear = 0
+        self._rc_angular = 0
+        self._rc_move_until = 0.0
+        self._rc_last_drive = 0.0
+        self._rc_last_mode_sent = 0.0
+        self._rc_last_mode_ok = False
+
     def _full_topic(self, short_topic: str) -> str:
         """Build the full topic path."""
         return f"{self.topic_prefix}/{self.device_id}/{short_topic}"
@@ -659,6 +679,7 @@ class NarwalClient:
 
     async def disconnect(self) -> None:
         """Disconnect from the vacuum and stop all tasks."""
+        await self._end_remote_control_session(send_off=True)
         ws = self._ws
         self._should_reconnect = False
         self._listener_active = False
@@ -825,7 +846,13 @@ class NarwalClient:
 
     @staticmethod
     def _encode_varint(value: int) -> bytes:
-        """Encode an integer as a protobuf varint."""
+        """Encode an integer as a protobuf varint.
+
+        Negative int32/int64 values are sign-extended to 64 bits, which makes
+        them 10-byte varints (telecontrol velocities are signed).
+        """
+        if value < 0:
+            value += 1 << 64
         result = []
         while value > 0x7F:
             result.append((value & 0x7F) | 0x80)
@@ -927,6 +954,13 @@ class NarwalClient:
         Does not wait for responses (the listener loop handles those).
         """
         if not self.connected or not self._ws:
+            return
+
+        # common/notify_app_event throws the robot out of remote control
+        # (verified on a Flow 2). While driving, only renew the
+        # broadcast subscription.
+        if self.remote_control_active:
+            await self._renew_topic_subscription()
             return
 
         commands = self._build_wake_commands()
@@ -1094,6 +1128,11 @@ class NarwalClient:
                     except Exception:
                         _LOGGER.debug("Keepalive send failed")
                         break
+                elif self.remote_control_active:
+                    # The velocity stream resets the idle timer and the
+                    # remote-control loop renews the subscription; a wake
+                    # burst or reconnect here would end the manual drive.
+                    consecutive_wake_failures = 0
                 elif self.state.is_docked:
                     # Silence from a docked robot is normal, not a fault.
                     #
@@ -1419,6 +1458,252 @@ class NarwalClient:
             _ExpectedResponse(topic, time.monotonic() + UNAWAITED_ACK_WINDOW),
         )
         _LOGGER.debug("Sent raw to topic: %s (%d bytes)", topic, len(frame))
+
+    # --- Remote control (manual drive) ---
+    #
+    # Protocol (Narwal app 2.9.90 via blutter, verified live on a Flow 2):
+    # set_manual_control_mode {1: mode} enters remote control
+    # (working status 21 within ~0.5 s); velocity_control {1: linear %,
+    # 2: angular %} must then be streamed, zero included, or the robot drops
+    # out. The app streams every 200 ms. Suction (modes 3-7) runs only a few
+    # seconds per request, so the mode is re-sent every second while wanted,
+    # except during a fan cool-down (base_status field 37).
+    #
+    # Callers set a target velocity with a time-to-live; the stream falls back
+    # to zero when it lapses, so a lost caller cannot leave the robot driving.
+
+    _RC_SUBSCRIPTION_RENEW = 20.0  # broadcasts last ~30 s per subscribe off the dock
+    _RC_ENTER_TIMEOUT = 10.0  # give up if status 21 never appears
+
+    @property
+    def remote_control_active(self) -> bool:
+        """True while this client runs a remote-control session."""
+        return self._rc_task is not None and not self._rc_task.done()
+
+    @property
+    def remote_control_mode(self) -> ManualControlMode:
+        """Mode requested for the current session (OFF when none)."""
+        return self._rc_mode if self.remote_control_active else ManualControlMode.OFF
+
+    async def _send_manual_control_mode(
+        self, mode: ManualControlMode
+    ) -> CommandResponse:
+        """Send set_manual_control_mode. OFF goes out as an empty payload."""
+        payload = (
+            b""
+            if mode == ManualControlMode.OFF
+            else self._encode_varint_field(1, int(mode))
+        )
+        resp = await self.send_command(
+            TOPIC_CMD_SET_MANUAL_CONTROL_MODE, payload, timeout=3.0
+        )
+        self._rc_last_mode_sent = time.monotonic()
+        self._rc_last_mode_ok = resp.result_code in (
+            CommandResult.SUCCESS,
+            CommandResult.CONFLICT,
+        )
+        if not self._rc_last_mode_ok:
+            _LOGGER.debug(
+                "set_manual_control_mode(%s) result=%s error=%s",
+                mode.name,
+                resp.result_code,
+                resp.data.get("2"),
+            )
+        return resp
+
+    def _velocity_payload(self, linear: int, angular: int) -> bytes:
+        """TelecontrolVelocity {1: linear %, 2: angular %}; type unset like the app."""
+        payload = b""
+        if linear:
+            payload += self._encode_varint_field(1, linear)
+        if angular:
+            payload += self._encode_varint_field(2, angular)
+        return payload
+
+    async def remote_control_start(
+        self, mode: ManualControlMode | int = ManualControlMode.JOYSTICK
+    ) -> CommandResponse:
+        """Enter remote control and start streaming velocity.
+
+        Refused (NOT_APPLICABLE) while a clean is running and not paused, as
+        the app does. A pending return to dock is cancelled first.
+        """
+        if not self.connected:
+            raise NarwalConnectionError("Not connected to vacuum")
+        mode = ManualControlMode(int(mode))
+        if mode in (ManualControlMode.OFF, ManualControlMode.CLEAN_DEFAULT):
+            mode = ManualControlMode.JOYSTICK
+        if self.state.is_cleaning and not self.state.is_paused:
+            _LOGGER.warning(
+                "remote_control_start: a clean is running; pause or stop it first"
+            )
+            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+        if self.state.is_returning:
+            await self.send_command(TOPIC_CMD_FORCE_END, timeout=15.0)
+
+        self._rc_mode = mode
+        resp = await self._send_manual_control_mode(mode)
+        if not self._rc_last_mode_ok:
+            # 2 (not possible now) is normal during a state transition; the
+            # loop retries once a second until status 21 or the enter timeout.
+            _LOGGER.info(
+                "remote_control_start: robot answered %s, retrying", resp.result_code
+            )
+        self._rc_last_drive = time.monotonic()
+        self._rc_linear = self._rc_angular = 0
+        self._rc_move_until = 0.0
+        if not self.remote_control_active:
+            self._rc_task = asyncio.create_task(self._remote_control_loop())
+        return resp
+
+    async def remote_control_move(
+        self, linear: int, angular: int, duration: float = 0.5
+    ) -> None:
+        """Drive at linear / angular percent (+ forward, + left) for duration s.
+
+        Each call replaces the previous target. When duration lapses the
+        robot is held at zero velocity (still in remote control).
+        """
+        if not self.remote_control_active:
+            raise NarwalCommandError("Remote control is not active")
+        self._rc_linear = max(-100, min(100, int(linear)))
+        self._rc_angular = max(-100, min(100, int(angular)))
+        duration = max(0.0, min(REMOTE_CONTROL_MAX_MOVE, float(duration)))
+        now = time.monotonic()
+        self._rc_move_until = now + duration
+        if self._rc_linear or self._rc_angular:
+            self._rc_last_drive = now
+
+    async def remote_control_set_suction(
+        self, mode: ManualControlMode | int
+    ) -> CommandResponse:
+        """Switch between JOYSTICK (no suction) and suction modes 3-7."""
+        if not self.remote_control_active:
+            raise NarwalCommandError("Remote control is not active")
+        mode = ManualControlMode(int(mode))
+        if mode in (ManualControlMode.OFF, ManualControlMode.CLEAN_DEFAULT):
+            mode = ManualControlMode.JOYSTICK
+        self._rc_mode = mode
+        self._rc_last_drive = time.monotonic()
+        return await self._send_manual_control_mode(mode)
+
+    async def remote_control_stop(self) -> None:
+        """Stop driving and leave remote control.
+
+        Also ends remote control started elsewhere (the Narwal app), where
+        this client holds no session but the robot reports status 21.
+        """
+        if self.remote_control_active:
+            await self._end_remote_control_session(send_off=True)
+        elif self.state.is_remote_control and self.connected:
+            await self._send_manual_control_mode(ManualControlMode.OFF)
+
+    async def _end_remote_control_session(self, *, send_off: bool) -> None:
+        """Cancel the stream and, when asked, send zero velocity and mode OFF."""
+        task = self._rc_task
+        was_active = self.remote_control_active
+        self._rc_task = None
+        for t in (task, self._rc_mode_task):
+            if t and not t.done() and t is not asyncio.current_task():
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await t
+        self._rc_mode_task = None
+        self._rc_linear = self._rc_angular = 0
+        self._rc_move_until = 0.0
+        if send_off and was_active and self.connected and self._ws:
+            with contextlib.suppress(Exception):
+                await self._send_unawaited(TOPIC_CMD_VELOCITY_CONTROL, b"")
+            with contextlib.suppress(Exception):
+                await self._send_manual_control_mode(ManualControlMode.OFF)
+            _LOGGER.info("Remote control ended")
+        self._rc_mode = ManualControlMode.OFF
+
+    def _rc_resend_mode_soon(self) -> None:
+        """Re-send the session mode without blocking the velocity stream."""
+        if self._rc_mode_task and not self._rc_mode_task.done():
+            return
+
+        async def _send() -> None:
+            with contextlib.suppress(Exception):
+                await self._send_manual_control_mode(self._rc_mode)
+
+        self._rc_mode_task = asyncio.create_task(_send())
+
+    async def _remote_control_loop(self) -> None:
+        """Stream velocity, keep the mode alive, end on idle or a state change."""
+        started = time.monotonic()
+        seen_remote_control = False
+        end_reason = "connection lost"
+        send_off = False
+        try:
+            while self.connected and self._ws:
+                now = time.monotonic()
+                if now < self._rc_move_until:
+                    linear, angular = self._rc_linear, self._rc_angular
+                else:
+                    linear = angular = 0
+                await self._send_unawaited(
+                    TOPIC_CMD_VELOCITY_CONTROL, self._velocity_payload(linear, angular)
+                )
+
+                status = self.state.working_status
+                if status == WorkingStatus.REMOTE_CONTROL:
+                    seen_remote_control = True
+                elif seen_remote_control and status not in (
+                    WorkingStatus.STANDBY,
+                    WorkingStatus.UNKNOWN,
+                ):
+                    # The robot chose another state (docked itself near the
+                    # dock, started cleaning, ...). Let it, as the app does.
+                    end_reason = f"robot left remote control for {status.name}"
+                    break
+
+                if not seen_remote_control and now - started > self._RC_ENTER_TIMEOUT:
+                    end_reason = "robot never entered remote control"
+                    send_off = True
+                    break
+                if now - self._rc_last_drive > REMOTE_CONTROL_IDLE_TIMEOUT:
+                    end_reason = "idle timeout"
+                    send_off = True
+                    break
+
+                since_mode = now - self._rc_last_mode_sent
+                dropped = status == WorkingStatus.STANDBY or not self._rc_last_mode_ok
+                wants_suction = (
+                    self._rc_mode in REMOTE_CONTROL_SUCTION_MODES
+                    and self.state.fan_cooldown_seconds <= 0
+                )
+                if (dropped and since_mode >= REMOTE_CONTROL_MODE_RETRY) or (
+                    wants_suction and since_mode >= REMOTE_CONTROL_SUCTION_RESEND
+                ):
+                    self._rc_resend_mode_soon()
+
+                if (
+                    self.supports_broadcasts
+                    and self.last_subscription_age > self._RC_SUBSCRIPTION_RENEW
+                ):
+                    await self._renew_topic_subscription()
+
+                await asyncio.sleep(REMOTE_CONTROL_STREAM_INTERVAL)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - a dead socket ends the session
+            end_reason = f"stream failed: {err}"
+        _LOGGER.info("Remote control session ended: %s", end_reason)
+        # Detach first so the cleanup below does not try to cancel this task.
+        if self._rc_task is asyncio.current_task():
+            self._rc_task = None
+        if send_off and self.connected and self._ws:
+            with contextlib.suppress(Exception):
+                await self._send_unawaited(TOPIC_CMD_VELOCITY_CONTROL, b"")
+            with contextlib.suppress(Exception):
+                await self._send_manual_control_mode(ManualControlMode.OFF)
+        self._rc_mode = ManualControlMode.OFF
+        self._rc_linear = self._rc_angular = 0
+        self._rc_move_until = 0.0
+        if self.on_state_update:
+            self.on_state_update(self.state)
 
     # --- High-level commands ---
 

@@ -972,6 +972,14 @@ class NarwalState:
     # omits field 50 from base_status, so missing field 50 is treated as 0.
     dock_light_mode: int | None = None
 
+    # Remote control (manual drive), from robot_base_status.
+    # field 31 = ManualControlMode + 1 (absent outside remote control);
+    # field 3.19 = 1 joystick only, 2 suction running;
+    # field 37 = suction cool-down in seconds (absent when none).
+    manual_control_mode: int | None = None
+    remote_control_suction_running: bool = False
+    fan_cooldown_seconds: int = 0
+
     # Current room being cleaned (working_status field 6, confirmed 2026-04-24).
     # room_id of the room the robot is actively cleaning right now.
     # None when robot is idle/docked or field 6 is absent/zero.
@@ -1014,6 +1022,11 @@ class NarwalState:
             or self.current_room_id is not None
             or bool(getattr(self, "current_room_aux_name", ""))
         )
+
+    @property
+    def is_remote_control(self) -> bool:
+        """True while the robot is in manual drive (working status 21)."""
+        return self.working_status == WorkingStatus.REMOTE_CONTROL
 
     @property
     def is_cleaning(self) -> bool:
@@ -1131,6 +1144,10 @@ class NarwalState:
         ):
             return True
         if self.working_status in ACTIVE_CLEANING_STATUSES:
+            return False
+        # Manual drive: the robot is being driven, never "on the dock" even if
+        # a stale dock field lingers from before it left.
+        if self.working_status == WorkingStatus.REMOTE_CONTROL:
             return False
         # For STANDBY, UNKNOWN, or any other status: check dock field signals.
         # Values differ across firmware versions:
@@ -1807,6 +1824,17 @@ class NarwalState:
                 self.dock_light_mode = None
         else:
             self.dock_light_mode = 0
+        # Field 31 = remote-control mode + 1, field 37 = suction cool-down (s).
+        # Both are omitted when not applicable, so absence resets them.
+        try:
+            raw_mode = int(decoded["31"]) - 1 if "31" in decoded else None
+        except (ValueError, TypeError):
+            raw_mode = None
+        self.manual_control_mode = raw_mode if raw_mode is None or raw_mode >= 0 else None
+        try:
+            self.fan_cooldown_seconds = max(0, int(decoded.get("37", 0)))
+        except (ValueError, TypeError):
+            self.fan_cooldown_seconds = 0
         # Field 3 is a nested message: {1: state_int, ...}
         # Sub-field layout differs across firmware versions:
         #   Old FW: {1: ws, 2: paused, 3: dock_presence, 7: returning,
@@ -1971,6 +1999,10 @@ class NarwalState:
                     self.dock_activity_generation += 1
             elif self.working_status not in ACTIVE_CLEANING_STATUSES:
                 self.dock_activity = 0
+            self.remote_control_suction_running = (
+                self.working_status == WorkingStatus.REMOTE_CONTROL
+                and _optional_int(field3.get("19")) == 2
+            )
             self.station_activity = 0
             if "18" in field3:
                 with contextlib.suppress(ValueError, TypeError):
@@ -2004,7 +2036,7 @@ class NarwalState:
                 if "47" not in decoded:
                     self.dock_field47 = 0
             # Log unrecognized sub-fields for future firmware mapping
-            _known_f3 = {"1", "2", "3", "7", "10", "12", "18"}
+            _known_f3 = {"1", "2", "3", "7", "10", "12", "18", "19"}
             _unknown_f3 = set(field3.keys()) - _known_f3
             if _unknown_f3:
                 _LOGGER.debug(

@@ -92,6 +92,25 @@ def build_frame(topic: str, payload: bytes = b"") -> bytes:
     return bytes([0x01, len(topic_bytes) + 2, 0x22, len(topic_bytes)]) + topic_bytes + payload
 ```
 
+### What the header actually is
+
+The bytes after `0x01` are a varint length followed by a protobuf `Header` message, which is
+why "`len(topic) + 2`" works for short topics. Field layout, from the Narwal app 2.9.90
+(`app_protol/proto/mqtt/srv/Header.pb.dart`, decompiled with blutter):
+
+| Field | Name | Notes |
+|---|---|---|
+| 1 | `extendedString` | |
+| 2 | `uuid` | |
+| 3 | `source` | enum |
+| 4 | `url` | the topic (requests and broadcasts) |
+| 5 | `properties` | `{1: responseUrl, 2: correlationData}`; present, empty, on responses |
+| 6 | `urlId` | int32 |
+
+A topic longer than 125 bytes needs a two-byte varint length, which a fixed `len + 2` byte
+gets wrong. Whether the robot ever fills `correlationData` (which would make responses
+self-identifying) is untested.
+
 ### Response frames
 
 Command responses come back as field 5 (`0x2a`) with an **empty topic**, so the header byte
@@ -211,6 +230,47 @@ Working model:
 A live socket is therefore *not* evidence of a live data stream. Track broadcast age
 separately from connection state.
 
+### What is measured and what is assumed
+
+The words "asleep" and "awake" above mix two different things. Kept apart:
+
+**Silence is mostly a lapsed subscription, not sleep (measured).** A docked, idle robot that
+broadcasts nothing still answers an addressed query in single-digit milliseconds (Flow AX12
+and Freo X10 Pro, table in §2; a Flow 2 answered `status/get_device_base_status`
+in 0–32 ms from a fresh socket that had sent nothing else). A fresh socket that
+does not subscribe receives no broadcasts at all. "No broadcast for 15 s" therefore means
+"the subscription ran out", and the client's `robot_awake` flag measures exactly that.
+
+**A genuinely unresponsive state also exists (measured, cause unknown).** On a Flow 2 the
+WebSocket upgrade completes but no command is answered, sometimes for minutes, even to the
+full wake burst; the robot's button or opening the Narwal app ends it. Because
+the `WebSocket++` server completes the handshake, the robot's Linux userspace is running; the
+robot's Matter endpoint reported a long uptime at the same time, so it is not a reboot
+or power-off either. The command-handling side behind port 9002 is what goes quiet.
+
+**The wake burst, item by item:**
+
+| Command | What it is known to do | Evidence |
+|---|---|---|
+| `common/active_robot_publish` (topic list) | Starts broadcasts for the listed topics | Measured |
+| `common/active_robot_publish` (`{1: 600}`) | Unknown; probably redundant with the above | None |
+| `status/app_status_heartbeat` | Resets the 60 s idle timeout; never answered; wakes nothing | Measured (#113) |
+| `status/get_device_base_status` | Returns status. Claimed to "force the main CPU awake" | **Unverified** — the claim came with commit `437ead5` without a capture |
+| `common/notify_app_event` `{1: 1}` | The app's "app opened" event | Side effect measured: **ends remote control** (§5 Remote control). Whether it ends the unresponsive state is unproven |
+
+The reconnect escalation ("a fresh TCP connection triggers the deep-sleep wake interrupt") is
+also a hypothesis, not a measurement.
+
+**Open lead: Matter.** The Flow 2 is Matter-certified and exposes the standard RVC clusters
+(Run Mode, Clean Mode, Operational State, Service Area, Identify). On a commissioned Flow 2
+live attribute reads and an Identify command were answered in ~15 ms.
+Whether Matter still answers, and whether it un-sticks port 9002, while 9002 is unresponsive is
+being tested; see §11.
+
+**`common/get_device_info` with an empty device id is not answered** on a Flow 2
+(10 s timeout, while the robot answered addressed queries instantly). The
+bootstrap in §3 works because a broadcast arrives first, not because of that reply.
+
 ---
 
 ## 5. Commands
@@ -264,6 +324,49 @@ command.
 | `map/get_map` | ~80 KB, full map (§8) |
 | `map/get_all_reduced_maps` | ~169 KB, every saved map |
 | `map/get_editable_map` | Editor representation |
+
+### Remote control (telecontrol)
+
+Manual drive, the app's joystick screen. Not in any earlier community project: decoded from the
+Narwal app 2.9.90 with blutter and verified live on a Flow 2.
+
+| Topic | Request | Reply |
+|---|---|---|
+| `telecontrol/set_manual_control_mode` | `{1: mode}` | `{1: result, 2: unifiedErrorCode}` |
+| `telecontrol/velocity_control` | `TelecontrolVelocity` | **none** — never queue a reply for it |
+
+`ManualControlMode`:
+
+| Value | Name | Effect |
+|---|---|---|
+| 0 | `OFF` | leave remote control; protobuf default, so sent as an empty payload |
+| 1 | `JOYSTICK` | drive, no suction |
+| 2 | `CLEAN_DEFAULT` | not explored |
+| 3–7 | `SWEEP_MUTE` / `NORMAL` / `STRONG` / `DEEP` / `SUPER` | drive with suction quiet / standard / strong / super powerful / ultra powerful |
+
+`TelecontrolVelocity`: 1 `linearVelocity` int32 percent (+ forward), 2 `angularVelocity` int32
+percent (+ left), 3 `type` enum (1 percentage, 2 actual; the app leaves it unset), 4/5 actual
+velocities as float (unused). Negative values are 10-byte sign-extended varints.
+
+How the app drives: it refuses while a clean runs unpaused, sends the mode, then repeats
+`velocity_control` every **200 ms** while the stick is held. Speeds from its slider `s`
+(0–100): forward `80 + 20·s/100`, turning `30 + 20·s/100` and `17 + 17·s/100`, backward about
+−70 %. Suction is selected by the mode value, not a separate command.
+
+How the robot behaves (verified):
+
+- After mode 1 it answers `1` and `robot_base_status` 3.1 becomes **21** within ~0.5 s.
+- A steady velocity stream, zero included, keeps it in remote control; without it the robot
+  drops back to standby (3.1 = 1). Re-sending the mode brings it back; `2` (not possible now)
+  can occur during the transition, so retry about once a second.
+- **Suction runs only a few seconds per request.** After a suction mode, 3.19 = 2 and field 31
+  = mode + 1, then they fall back to 3.19 = 1 / 31 = 2 within 2–10 s. Re-sending the mode
+  every second keeps it mostly on; field 37 is a cool-down during which suction cannot resume.
+- Near the dock it may dock itself (3.1 = 10) and leave remote control.
+- `common/notify_app_event` ends remote control. `task/force_end` also ends it.
+
+Unexplored topics in the same group: `point_navi`, `stop_point_navi`, `navi_to_room`,
+`navi_to_region`, `get_two_rooms_crossing_point`, `perform_choreography`.
 
 ### Developer
 
@@ -344,12 +447,15 @@ Field names from the decompiled `BuilderInfo`; values live-validated where noted
 | 25 | Device status code list |
 | 26 | Active fan level |
 | 29 | Active mop humidity |
+| 31 | Remote-control mode + 1 (`2` joystick, `4`–`8` suction); absent outside remote control (Flow 2) |
 | 35 | Station bag health %, float32 — *absent on AX12 v01.08.03.07* |
 | 36 | Station bag health reset time (Unix seconds) — **unverified** |
+| 37 | Suction cool-down in remote control, seconds, counts down; absent when none (Flow 2) |
 | 38 | **Disputed** — `100` on every observation. Read as battery *design capacity* in one place and as curing-agent consumption % in another; see §11 |
 | 39 | Station bag state (enum) |
 | 41 | Detergent remaining % (`heavyDetergentRemainPercent`) — **unverified**, `100` on every observation; see §11 |
 | 47 | Charging status (enum) |
+| 50 | Dock ambient light mode (0 off, 1 night, 2 warm, 3 purple); absent when off |
 
 Fields 20/21/35/36/38/39/41 are the consumables group — see [Consumables and station wear](#consumables-and-station-wear).
 
@@ -362,7 +468,8 @@ Field 3 sub-fields:
 | 3.7 | `1` = returning to dock |
 | 3.10 | Dock sub-state (1 = docked, 2 = docking) |
 | 3.12 | Dock activity (2, 6 observed) |
-| 3.18 | Purpose unknown; `1` on CX7, where it is one of only two sub-fields present |
+| 3.18 | Station activity: 1 during dust gathering, 4 during drying/disinfection; `1` on CX7, where it is one of only two sub-fields present |
+| 3.19 | In remote control: `1` joystick only, `2` suction running (Flow 2) |
 
 **On the CX7 this message is close to useless as a state signal.** Field 3 is exactly
 `{1: 19, 18: 1}` — none of 3.2, 3.7, 3.10 or 3.12 exist — and it did not change across 40 s
@@ -385,11 +492,12 @@ was accepted by the robot with `SUCCESS` in the same state.
 | 1 | `STANDBY` — idle; also a transition state |
 | 2 | `DOCKED_V2` — on dock (v01.07.23.00+, sub-field 4 = 1 while charging). **On v01.09.10.02 the robot also reports 2 while cleaning off the dock, with sub-field 4 = 3** (#124, #115, two Flow 2 robots); the integration promotes that pair to `CLEANING_V2` at parse time. Sub-field 4 therefore looks like a task kind (1 = charging, 3 = cleaning), with 2 meaning "a task is running" — the one observation that does not fit (status 2 off-dock with no sub-field 4, after a `start_clean` rejected during `wash_mop`) stays not-cleaning. |
 | 4 | `CLEANING` |
-| 5 | `CLEANING_ALT` — observed while the robot was physically stuck |
+| 5 | `CLEANING_ALT` — first observed while a robot was stuck; on a Flow 2 it is the ordinary cleaning state |
 | 7 | `REMAPPING` — exploring/rebuilding; camera active |
 | 10 | `DOCKED` |
 | 14 | `CHARGED` — reported before 100%; use battery level for charge state |
 | 19 | `TASK_COMPLETED` — transitional, returning to base |
+| 21 | `REMOTE_CONTROL` — manual drive via telecontrol (Flow 2) |
 
 Values 2, 17 and 19 were each discovered when someone's log flooded with an unmapped value.
 **No error value has ever been observed** — a robot fault cannot currently be represented.
@@ -773,6 +881,15 @@ passes); we expose one control.
 - *Are the tank/box/bag enum thresholds right?* We treat `1` as OK and `>= 2` as attention by
   inference from enum ordering. [#77](https://github.com/sjmotew/NarwalIntegration/issues/77)
   suggests at least one model disagrees.
+
+**What ends the unresponsive state locally?** See §4. Three experiments settle it: a capture of
+what the app sends to port 9002 when it opens (tcpdump on a router between phone and robot),
+a search of the decompiled app for wake/sleep/standby topics, and timing each wake candidate,
+and a Matter read or command, one at a time against a robot that has stopped answering.
+
+**Remote control.** Why suction stops after a few seconds even with the mode re-sent, the
+meaning of mode 2 (`CLEAN_DEFAULT`), whether remote control works on models other than the
+Flow 2, and the payloads of `point_navi` / `navi_to_room` / `navi_to_region`.
 
 **Unexplored topics.** `/schedule/clean_schedule/get`, `/config/get`, `/config/volume/set` and
 `/info/get_clean_time_line` are all known to exist and have never been probed locally.

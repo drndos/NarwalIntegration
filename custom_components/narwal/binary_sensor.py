@@ -23,6 +23,7 @@ from .const import (
 )
 from .coordinator import NarwalCoordinator
 from .entity import NarwalDockEntity, NarwalEntity
+from .remote_control import NarwalRemoteSuctionBinarySensor
 from .narwal_client import NarwalState
 
 
@@ -161,7 +162,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up Narwal binary sensor entities."""
     coordinator = entry.runtime_data
-    entities: list[BinarySensorEntity] = [NarwalDockedSensor(coordinator)]
+    entities: list[BinarySensorEntity] = [
+        NarwalDockedSensor(coordinator),
+        NarwalRemoteSuctionBinarySensor(coordinator),
+    ]
     entities += [
         (
             NarwalDockBinarySensor(coordinator, description)

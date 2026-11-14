@@ -256,6 +256,7 @@ def is_narwal_task_busy(state: NarwalState | None) -> bool:
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
         or state.working_status == WorkingStatus.REMAPPING
+        or state.working_status == WorkingStatus.REMOTE_CONTROL
         or (
             state.working_status == WorkingStatus.TASK_COMPLETED
             and not state.has_current_dock_presence_signal
@@ -453,6 +454,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             supports_broadcasts=supports_broadcasts,
         )
         self.clean_settings = CleanSettings()
+        # Suction for the next remote-control session (remote_control.py).
+        self.remote_control_suction: str = "off"
         self.room_clean_settings: dict[tuple[str | None, int], RoomCleanSettings] = {}
         self.room_clean_settings_customized: dict[tuple[str | None, int], set[str]] = {}
         self.selected_clean_rooms: dict[str | None, set[int]] = {}

@@ -9,6 +9,13 @@ instance and verified on hardware before it was pushed.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). **Breaking** marks a
 change that can alter the behaviour of an existing automation or dashboard.
 
+## [Unreleased]
+
+- **Added:** remote control (manual drive) on the Flow 2: `narwal.remote_control_start`, `narwal.remote_control_move`, `narwal.remote_control_stop`, a *Remote control* switch, a *Remote control suction* select, and diagnostic *Suction cool-down* and *Remote control suction running* entities. See [docs/REMOTE-CONTROL.md](docs/REMOTE-CONTROL.md). Untested on hardware through Home Assistant yet.
+- **Fixed:** working status `21` (remote control, e.g. driven from the Narwal app) is no longer logged as unknown and no longer turns the vacuum `unknown`; it reads as idle, or cleaning while suction runs.
+- **Fixed:** negative protobuf varints are encoded as 10-byte sign-extended values (needed for reverse and right turns).
+- **Changed:** the wake burst is not sent while this client drives the robot, because `common/notify_app_event` ends remote control.
+
 ## [v1.0.12] — 2026-11-13
 
 *Room order sticks, the dock tells the truth, and the map is yours to draw.* **One breaking change.**

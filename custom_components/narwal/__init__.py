@@ -37,6 +37,9 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     SERVICE_CLEAN_ROOMS,
+    SERVICE_REMOTE_CONTROL_MOVE,
+    SERVICE_REMOTE_CONTROL_START,
+    SERVICE_REMOTE_CONTROL_STOP,
     SERVICE_SET_PENDING_PROFILES,
     configured_model_name,
 )
@@ -47,8 +50,14 @@ from .coordinator import (
 from .narwal_client import (
     CommandResult,
     FanLevel,
+    NarwalCommandError,
     NarwalConnectionError,
     RoomCleanSettings,
+)
+from .remote_control import (
+    RC_SUCTION_OPTIONS,
+    async_start_remote_control,
+    async_stop_remote_control,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -94,6 +103,31 @@ CLEAN_ROOMS_SCHEMA = vol.Schema(
         vol.Optional(FIELD_ROUTE): vol.In(ROUTE_OPTIONS),
     }
 )
+
+
+_RC_TARGET_FIELDS = {
+    vol.Optional(ATTR_ENTITY_ID): cv.comp_entity_ids,
+    vol.Optional(ATTR_DEVICE_ID): cv.ensure_list,
+    vol.Optional(ATTR_AREA_ID): cv.ensure_list,
+}
+FIELD_LINEAR = "linear"
+FIELD_ANGULAR = "angular"
+FIELD_DURATION = "duration"
+_PERCENT = vol.All(vol.Coerce(int), vol.Range(min=-100, max=100))
+REMOTE_CONTROL_START_SCHEMA = vol.Schema(
+    {**_RC_TARGET_FIELDS, vol.Optional(FIELD_SUCTION): vol.In(RC_SUCTION_OPTIONS)}
+)
+REMOTE_CONTROL_MOVE_SCHEMA = vol.Schema(
+    {
+        **_RC_TARGET_FIELDS,
+        vol.Optional(FIELD_LINEAR, default=0): _PERCENT,
+        vol.Optional(FIELD_ANGULAR, default=0): _PERCENT,
+        vol.Optional(FIELD_DURATION, default=0.5): vol.All(
+            vol.Coerce(float), vol.Range(min=0.0, max=5.0)
+        ),
+    }
+)
+REMOTE_CONTROL_STOP_SCHEMA = vol.Schema(_RC_TARGET_FIELDS)
 
 
 def _validate_pending_pass_count(value: object) -> int:
@@ -350,7 +384,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
     """Register Narwal domain services."""
     register_clean_rooms = not hass.services.has_service(DOMAIN, SERVICE_CLEAN_ROOMS)
     register_pending_profiles = not hass.services.has_service(DOMAIN, SERVICE_SET_PENDING_PROFILES)
-    if not register_clean_rooms and not register_pending_profiles:
+    register_remote_control = not hass.services.has_service(
+        DOMAIN, SERVICE_REMOTE_CONTROL_START
+    )
+    if not (register_clean_rooms or register_pending_profiles or register_remote_control):
         return
 
     async def _async_extract_entity_ids(call: ServiceCall) -> list[str]:
@@ -500,6 +537,59 @@ def _async_register_services(hass: HomeAssistant) -> None:
             SERVICE_SET_PENDING_PROFILES,
             async_set_pending_profiles,
             schema=SET_PENDING_PROFILES_SCHEMA,
+        )
+
+    async def _async_single_coordinator(call: ServiceCall) -> NarwalCoordinator:
+        """Resolve a remote-control call to exactly one Narwal coordinator."""
+        entity_ids = await _async_extract_entity_ids(call)
+        entity_ids = await _async_validate_clean_rooms_targets(hass, call, entity_ids)
+        coordinators = await _async_get_service_coordinators(hass, entity_ids)
+        if len(coordinators) != 1:
+            raise HomeAssistantError("Target exactly one Narwal vacuum")
+        return coordinators[0]
+
+    async def async_remote_control_start(call: ServiceCall) -> None:
+        coordinator = await _async_single_coordinator(call)
+        await async_start_remote_control(coordinator, call.data.get(FIELD_SUCTION))
+
+    async def async_remote_control_move(call: ServiceCall) -> None:
+        coordinator = await _async_single_coordinator(call)
+        client = coordinator.client
+        if not client.remote_control_active:
+            raise HomeAssistantError(
+                "Narwal remote control is not active; call narwal.remote_control_start first"
+            )
+        try:
+            await client.remote_control_move(
+                call.data[FIELD_LINEAR],
+                call.data[FIELD_ANGULAR],
+                call.data[FIELD_DURATION],
+            )
+        except NarwalCommandError as err:
+            raise HomeAssistantError(str(err)) from err
+
+    async def async_remote_control_stop(call: ServiceCall) -> None:
+        coordinator = await _async_single_coordinator(call)
+        await async_stop_remote_control(coordinator)
+
+    if register_remote_control:
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REMOTE_CONTROL_START,
+            async_remote_control_start,
+            schema=REMOTE_CONTROL_START_SCHEMA,
+        )
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REMOTE_CONTROL_MOVE,
+            async_remote_control_move,
+            schema=REMOTE_CONTROL_MOVE_SCHEMA,
+        )
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REMOTE_CONTROL_STOP,
+            async_remote_control_stop,
+            schema=REMOTE_CONTROL_STOP_SCHEMA,
         )
 
 

@@ -84,6 +84,9 @@
           "fully_charged": "Fully Charged",
           "not_charging": "Not Charging"
         }
+      },
+      "suction_cooldown": {
+        "name": "Suction cool-down"
       }
     },
     "binary_sensor": {
@@ -121,6 +124,9 @@
       },
       "replacement_required": {
         "name": "Replacement required"
+      },
+      "remote_control_suction_running": {
+        "name": "Remote control suction running"
       }
     },
     "select": {
@@ -183,6 +189,17 @@
       },
       "room_passes": {
         "name": "{room_name} passes"
+      },
+      "remote_control_suction": {
+        "name": "Remote control suction",
+        "state": {
+          "off": "Off",
+          "quiet": "Quiet",
+          "standard": "Standard",
+          "strong": "Strong",
+          "super": "Super powerful",
+          "ultra": "Ultra powerful"
+        }
       }
     },
     "number": {
@@ -222,6 +239,9 @@
       },
       "room_selected": {
         "name": "{room_name} selected"
+      },
+      "remote_control": {
+        "name": "Remote control"
       }
     },
     "camera": {
@@ -275,6 +295,16 @@
         "standard": "Standard",
         "meticulous": "Meticulous"
       }
+    },
+    "remote_control_suction": {
+      "options": {
+        "off": "Off",
+        "quiet": "Quiet",
+        "standard": "Standard",
+        "strong": "Strong",
+        "super": "Super powerful",
+        "ultra": "Ultra powerful"
+      }
     }
   },
   "services": {
@@ -305,6 +335,38 @@
           "name": "Route"
         }
       }
+    },
+    "remote_control_start": {
+      "name": "Start remote control",
+      "description": "Put the robot in manual drive. Verified on the Flow 2. Ends after 30 s without a move.",
+      "fields": {
+        "suction": {
+          "name": "Suction",
+          "description": "Suction while driving."
+        }
+      }
+    },
+    "remote_control_move": {
+      "name": "Remote control move",
+      "description": "Drive for a short time, then hold still. Call repeatedly to keep moving.",
+      "fields": {
+        "linear": {
+          "name": "Linear speed",
+          "description": "Percent, positive forward, negative backward."
+        },
+        "angular": {
+          "name": "Turn speed",
+          "description": "Percent, positive left, negative right."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Seconds to keep this speed (max 5)."
+        }
+      }
+    },
+    "remote_control_stop": {
+      "name": "Stop remote control",
+      "description": "Stop driving and leave manual drive."
     }
   }
 }

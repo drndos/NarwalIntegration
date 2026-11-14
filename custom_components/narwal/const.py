@@ -125,6 +125,9 @@ MAP_ZOOM_DEFAULT = 1.0  # renderer clamps to 1.0–2.0
 CONF_DOCK_LIGHT_SUPPORTED = "dock_light_supported"
 SERVICE_CLEAN_ROOMS = "clean_rooms"
 SERVICE_SET_PENDING_PROFILES = "set_pending_profiles"
+SERVICE_REMOTE_CONTROL_START = "remote_control_start"
+SERVICE_REMOTE_CONTROL_MOVE = "remote_control_move"
+SERVICE_REMOTE_CONTROL_STOP = "remote_control_stop"
 
 def product_keys_for_model(label: str) -> set[str]:
     """Every product key known to belong to one selector model."""

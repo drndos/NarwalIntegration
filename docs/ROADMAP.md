@@ -11,7 +11,9 @@ release is tracked on the repository's
 1. **Repair issues.** The integration raises a repair only for an invalidated area mapping. v1.0.8 renamed suction tiers and removed a sensor; changes like that should surface as repairs rather than release-notes prose.
 2. **Multi-floor map switching** ([#43](https://github.com/sjmotew/NarwalIntegration/issues/43)). The only substantial unimplemented request, now tractable through the `map_id` plumbing that landed with the room profiles.
 3. **Last-clean sensors** ([#32](https://github.com/sjmotew/NarwalIntegration/issues/32)).
-4. **Home Assistant 2027.8 deprecations.** `via_device` in the entity device info and `async_get_device` in setup both log deprecation warnings on current HA; both need replacing before that release.
+4. **Remote control (manual drive).** Code landed on `feat/remote-control`; needs hardware verification through Home Assistant on a Flow 2 and a probe on other models. See [REMOTE-CONTROL.md](REMOTE-CONTROL.md).
+5. **What actually wakes a robot that stops answering on port 9002.** The wake burst is mostly untested folklore (see PROTOCOL.md §4). A Matter-based test is running; an app-traffic capture and a decompiled-app search are the other routes.
+6. **Home Assistant 2027.8 deprecations.** `via_device` in the entity device info and `async_get_device` in setup both log deprecation warnings on current HA; both need replacing before that release.
 
 ## On hold
 
@@ -31,7 +33,7 @@ Researched and probed, parked pending further reverse engineering.
 
 | Piece | Status |
 |---|---|
-| Send the robot to a point or room | Room cleans work today; patrol topics are identified in the APK and unprobed |
+| Send the robot to a point or room | Room cleans work today; manual drive works on the Flow 2; `telecontrol/point_navi`, `navi_to_room` and `navi_to_region` are identified in the app and unprobed |
 | Still images | Snapshot works, decryption needs the per-device key (above) |
 | Live video | Agora session, cloud tokens; community add-on exists (above) |
 | Sounds | `locate` plays the find-me chime today; the speaker topics for arbitrary audio are unexplored |

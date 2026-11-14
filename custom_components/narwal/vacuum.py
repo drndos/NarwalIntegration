@@ -76,6 +76,9 @@ WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
     WorkingStatus.REMAPPING: VacuumActivity.CLEANING,
     WorkingStatus.TASK_COMPLETED: VacuumActivity.RETURNING,
     WorkingStatus.ERROR: VacuumActivity.ERROR,
+    # Manual drive. HA has no "remote control" activity; IDLE unless suction
+    # is running (3.19 = 2), which reads as CLEANING in activity().
+    WorkingStatus.REMOTE_CONTROL: VacuumActivity.IDLE,
 }
 def _result_name(result_code: int | CommandResult) -> str:
     """Return a readable Narwal command result name."""
@@ -110,6 +113,8 @@ def _task_status(state: Any) -> str:
         return "paused"
     if state.working_status == WorkingStatus.REMAPPING:
         return "remapping"
+    if state.working_status == WorkingStatus.REMOTE_CONTROL:
+        return "remote_control"
     if state.is_returning or (
         state.working_status == WorkingStatus.TASK_COMPLETED
         and not state.has_current_dock_presence_signal
@@ -418,6 +423,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             return VacuumActivity.RETURNING
         if state.is_cleaning or state.has_assumed_robot_clean:
             return VacuumActivity.CLEANING
+        if state.working_status == WorkingStatus.REMOTE_CONTROL:
+            if state.remote_control_suction_running:
+                return VacuumActivity.CLEANING
+            return VacuumActivity.IDLE
         if _is_dock_side(state):
             return VacuumActivity.DOCKED
         activity = WORKING_STATUS_TO_ACTIVITY.get(state.working_status)
@@ -514,6 +523,9 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
     async def async_start(self) -> None:
         """Start or resume cleaning."""
         room_ids: list[int] = []
+        if self.coordinator.client.remote_control_active:
+            # A clean cannot start from manual drive; leave it first.
+            await self.coordinator.client.remote_control_stop()
         async with self.coordinator.dock_action_lock:
             await self._ensure_awake()
             if not await self.coordinator.async_refresh_action_status():
