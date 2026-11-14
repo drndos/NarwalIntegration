@@ -69,3 +69,4 @@ prompt.md
 
 # Throwaway HA used by e2e/run_e2e.py
 e2e/.ha-config/
+core.entity_registry
