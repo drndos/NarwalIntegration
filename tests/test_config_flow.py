@@ -697,3 +697,76 @@ class TestDiscovery:
 
         assert flow._discovered_host is None
         flow.async_show_form.assert_called_once()
+
+
+class TestFlow2SiblingProductKey:
+    """A Flow 2 picked from the list may carry another of its product keys."""
+
+    DEVICE_ID = "0123456789abcdef0123456789abcdef"
+
+    def _make_flow(self) -> NarwalConfigFlow:
+        flow = NarwalConfigFlow.__new__(NarwalConfigFlow)
+        flow.async_show_form = MagicMock(return_value={"type": "form"})
+        flow.async_create_entry = MagicMock(return_value={"type": "create_entry"})
+        flow.async_set_unique_id = AsyncMock()
+        flow._abort_if_unique_id_configured = MagicMock()
+        flow._pending_user_input = {"host": "10.0.0.90", "port": 9002, "model": "Narwal Flow 2"}
+        flow._pending_product_key = NARWAL_MODELS["Narwal Flow 2"]
+        return flow
+
+    def _client(self, *, answers: bool, prefix: str | None = None) -> AsyncMock:
+        client = AsyncMock()
+        client.topic_prefix = prefix
+        if answers:
+            info = MagicMock()
+            info.device_id = self.DEVICE_ID
+            client.get_device_info.return_value = info
+        else:
+            client.get_device_info.side_effect = TimeoutError
+        return client
+
+    async def test_silent_selected_key_falls_back_to_auto_detect(self) -> None:
+        """Live: "Narwal Flow 2" + an iSuVlI1If2 robot failed with the right id."""
+        flow = self._make_flow()
+        wrong = self._client(answers=False, prefix="/QxMSPG6VSO")
+        right = self._client(answers=True, prefix="/iSuVlI1If2")
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient",
+            side_effect=[wrong, right],
+        ) as client_class:
+            result = await flow.async_step_device_id(user_input={"device_id": self.DEVICE_ID})
+
+        assert result == {"type": "create_entry"}
+        prefixes = [c.kwargs["topic_prefix"] for c in client_class.call_args_list]
+        assert prefixes == ["/QxMSPG6VSO", None]
+        right.discover_device_id.assert_awaited_once()
+        wrong.disconnect.assert_awaited_once()
+        right.disconnect.assert_awaited_once()
+        data = flow.async_create_entry.call_args.kwargs["data"]
+        assert data["product_key"] == "iSuVlI1If2"
+        assert flow.async_create_entry.call_args.kwargs["title"] == "Narwal Flow 2"
+
+    async def test_selected_key_that_answers_is_not_retried(self) -> None:
+        flow = self._make_flow()
+        right = self._client(answers=True, prefix="/QxMSPG6VSO")
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient", return_value=right
+        ) as client_class:
+            await flow.async_step_device_id(user_input={"device_id": self.DEVICE_ID})
+
+        client_class.assert_called_once()
+        right.discover_device_id.assert_not_awaited()
+
+    async def test_both_attempts_silent_reports_cannot_connect(self) -> None:
+        flow = self._make_flow()
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient",
+            side_effect=[self._client(answers=False), self._client(answers=False)],
+        ):
+            await flow.async_step_device_id(user_input={"device_id": self.DEVICE_ID})
+
+        assert flow.async_show_form.call_args.kwargs["errors"] == {"base": "cannot_connect"}
+        flow.async_create_entry.assert_not_called()

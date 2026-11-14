@@ -265,34 +265,53 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
                     errors={"base": "device_id_required"},
                 )
 
-            setup = self._pending_user_input
             product_key = self._pending_product_key
-            topic_prefix = None if product_key == "auto" else f"/{product_key}"
-            client = NarwalClient(
-                host=setup["host"],
-                port=setup.get("port", DEFAULT_PORT),
-                device_id=device_id,
-                topic_prefix=topic_prefix,
-            )
-            try:
-                await client.connect()
-                if product_key == "auto":
-                    await client.discover_device_id(timeout=15.0)
-                    await client.drain_ws_buffer()
-                device_info = await client.get_device_info()
-            except Exception as ex:
-                _LOGGER.warning("Device ID validation failed: %s: %s", type(ex).__name__, ex)
-                errors["base"] = "cannot_connect"
-            else:
-                return await self._async_create_entry(client, device_info.device_id)
-            finally:
-                await client.disconnect()
+            # The robot ignores topics under another product key, and one
+            # model ships several keys (a Flow 2 seen with three). Choosing
+            # "Narwal Flow 2" for an iSuVlI1If2 robot failed here with the
+            # right Device ID, so when the selected key gets no answer, fall
+            # back to auto-detect, which reads the key off the robot.
+            attempts = ["auto"] if product_key == "auto" else [product_key, "auto"]
+            for attempt in attempts:
+                result = await self._async_validate_device_id(device_id, attempt)
+                if result is not None:
+                    return result
+            errors["base"] = "cannot_connect"
 
         return self.async_show_form(
             step_id=step_id,
             data_schema=STEP_DEVICE_ID_DATA_SCHEMA,
             errors=errors,
         )
+
+    async def _async_validate_device_id(
+        self, device_id: str, product_key: str
+    ) -> ConfigFlowResult | None:
+        """Ask the robot for its identity under one product key; None if it stays silent."""
+        setup = self._pending_user_input
+        auto = product_key == "auto"
+        client = NarwalClient(
+            host=setup["host"],
+            port=setup.get("port", DEFAULT_PORT),
+            device_id=device_id,
+            topic_prefix=None if auto else f"/{product_key}",
+        )
+        try:
+            await client.connect()
+            if auto:
+                await client.discover_device_id(timeout=15.0)
+                await client.drain_ws_buffer()
+            device_info = await client.get_device_info()
+        except Exception as ex:
+            _LOGGER.warning(
+                "Device ID validation with product key %s failed: %s: %s",
+                product_key, type(ex).__name__, ex,
+            )
+            return None
+        else:
+            return await self._async_create_entry(client, device_info.device_id)
+        finally:
+            await client.disconnect()
 
     async def _async_create_entry(self, client: NarwalClient, device_id: str) -> ConfigFlowResult:
         """Create an entry from a locally validated robot identity."""
