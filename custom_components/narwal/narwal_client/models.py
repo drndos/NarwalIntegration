@@ -972,6 +972,18 @@ class NarwalState:
     # omits field 50 from base_status, so missing field 50 is treated as 0.
     dock_light_mode: int | None = None
 
+    # Remote control (manual drive), from robot_base_status.
+    # field 31 = ManualControlMode + 1 (absent outside remote control);
+    # field 3.19 = 1 joystick only, 2 suction running;
+    # field 37 = suction cool-down in seconds (absent when none).
+    manual_control_mode: int | None = None
+    remote_control_suction_running: bool = False
+    fan_cooldown_seconds: int = 0
+    # True from manual drive (21) until the robot reports a state other than
+    # 21, 19, standby or unknown. Leaving manual drive away from the dock, the
+    # Flow 2 reports 19 (TASK_COMPLETED) and sits still; it does not head home.
+    after_remote_control: bool = False
+
     # Current room being cleaned (working_status field 6, confirmed 2026-04-24).
     # room_id of the room the robot is actively cleaning right now.
     # None when robot is idle/docked or field 6 is absent/zero.
@@ -1013,6 +1025,25 @@ class NarwalState:
             or getattr(self, "task_remaining_time", 0) > 0
             or self.current_room_id is not None
             or bool(getattr(self, "current_room_aux_name", ""))
+        )
+
+    @property
+    def is_remote_control(self) -> bool:
+        """True while the robot is in manual drive (working status 21)."""
+        return self.working_status == WorkingStatus.REMOTE_CONTROL
+
+    @property
+    def is_idle_after_remote_control(self) -> bool:
+        """True when manual drive ended away from the dock and the robot sits still.
+
+        Live-validated on a Flow 2 (fw 01.10.30.02): after manual drive it
+        reports 19 with dock fields 11 = 1 / 47 = 2 and stays put
+        indefinitely. A recall is accepted and docks it.
+        """
+        return (
+            self.after_remote_control
+            and self.working_status == WorkingStatus.TASK_COMPLETED
+            and self.has_explicit_off_dock_signal
         )
 
     @property
@@ -1132,6 +1163,10 @@ class NarwalState:
             return True
         if self.working_status in ACTIVE_CLEANING_STATUSES:
             return False
+        # Manual drive: the robot is being driven, never "on the dock" even if
+        # a stale dock field lingers from before it left.
+        if self.working_status == WorkingStatus.REMOTE_CONTROL:
+            return False
         # For STANDBY, UNKNOWN, or any other status: check dock field signals.
         # Values differ across firmware versions:
         #   Old FW: dock_sub_state=1, dock_field11=2, dock_field47=3
@@ -1175,7 +1210,16 @@ class NarwalState:
         Only valid while working_status is CLEANING — once the robot
         transitions to STANDBY/DOCKED/CHARGED, it has already docked
         even if field 3.7 is momentarily still set.
+
+        Exception, live-validated on a Flow 2 (fw 01.10.30.02) recalled from
+        idle: it reported {1=10, 10=2} with dock fields 11 = 1 / 47 = 2 all
+        the way home, then 11 = 2 / 47 = 3 once seated. Status 10 with an
+        explicit off-dock signal and 3.10 = 2 is a return in progress.
         """
+        if self.working_status == WorkingStatus.DOCKED:
+            return self.dock_sub_state == 2 and (
+                self.dock_field11 == 1 or self.dock_field47 == 2
+            )
         if self.working_status not in ACTIVE_CLEANING_STATUSES:
             return False
         return self.is_returning_to_dock and self.dock_sub_state == 2
@@ -1807,6 +1851,17 @@ class NarwalState:
                 self.dock_light_mode = None
         else:
             self.dock_light_mode = 0
+        # Field 31 = remote-control mode + 1, field 37 = suction cool-down (s).
+        # Both are omitted when not applicable, so absence resets them.
+        try:
+            raw_mode = int(decoded["31"]) - 1 if "31" in decoded else None
+        except (ValueError, TypeError):
+            raw_mode = None
+        self.manual_control_mode = raw_mode if raw_mode is None or raw_mode >= 0 else None
+        try:
+            self.fan_cooldown_seconds = max(0, int(decoded.get("37", 0)))
+        except (ValueError, TypeError):
+            self.fan_cooldown_seconds = 0
         # Field 3 is a nested message: {1: state_int, ...}
         # Sub-field layout differs across firmware versions:
         #   Old FW: {1: ws, 2: paused, 3: dock_presence, 7: returning,
@@ -1918,6 +1973,14 @@ class NarwalState:
                     )
                     next_working_status = WorkingStatus.UNKNOWN
                 self.working_status = next_working_status
+                if next_working_status == WorkingStatus.REMOTE_CONTROL:
+                    self.after_remote_control = True
+                elif next_working_status not in (
+                    WorkingStatus.TASK_COMPLETED,
+                    WorkingStatus.STANDBY,
+                    WorkingStatus.UNKNOWN,
+                ):
+                    self.after_remote_control = False
                 terminal_robot = self.working_status in {
                     WorkingStatus.TASK_COMPLETED,
                     WorkingStatus.ERROR,
@@ -1971,6 +2034,10 @@ class NarwalState:
                     self.dock_activity_generation += 1
             elif self.working_status not in ACTIVE_CLEANING_STATUSES:
                 self.dock_activity = 0
+            self.remote_control_suction_running = (
+                self.working_status == WorkingStatus.REMOTE_CONTROL
+                and _optional_int(field3.get("19")) == 2
+            )
             self.station_activity = 0
             if "18" in field3:
                 with contextlib.suppress(ValueError, TypeError):
@@ -2004,7 +2071,7 @@ class NarwalState:
                 if "47" not in decoded:
                     self.dock_field47 = 0
             # Log unrecognized sub-fields for future firmware mapping
-            _known_f3 = {"1", "2", "3", "7", "10", "12", "18"}
+            _known_f3 = {"1", "2", "3", "7", "10", "12", "18", "19"}
             _unknown_f3 = set(field3.keys()) - _known_f3
             if _unknown_f3:
                 _LOGGER.debug(

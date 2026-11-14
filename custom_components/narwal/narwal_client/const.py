@@ -118,6 +118,13 @@ TOPIC_CMD_TAKE_PICTURE = "developer/take_picture"
 TOPIC_CMD_SET_LED = "developer/led_control"
 TOPIC_CMD_GET_DEBUG_IMAGE = "developer/get_robot_debug_image"  # cleartext carpet/planning PNGs
 
+# Remote control (manual drive). Decoded from the Narwal app 2.9.90 with
+# blutter and verified live on a Flow 2.
+# set_manual_control_mode answers {1: result, 2: unifiedErrorCode};
+# velocity_control is never answered.
+TOPIC_CMD_SET_MANUAL_CONTROL_MODE = "telecontrol/set_manual_control_mode"
+TOPIC_CMD_VELOCITY_CONTROL = "telecontrol/velocity_control"
+
 # Wake / Keep-alive (from APK analysis — candidates for waking sleeping robot)
 TOPIC_CMD_ACTIVE_ROBOT = "common/active_robot_publish"  # TopicDuration keepalive
 TOPIC_CMD_APP_HEARTBEAT = "status/app_status_heartbeat"  # periodic app heartbeat
@@ -161,7 +168,20 @@ UNAWAITED_ACK_WINDOW = 5.0  # seconds
 # response order. On a Freo X10 Pro (v01.03.10.03) status/app_status_heartbeat
 # drew no response, alone or inside a wake burst, while active_robot_publish,
 # notify_app_event and get_device_base_status were each answered once.
-UNACKNOWLEDGED_TOPICS = frozenset({TOPIC_CMD_APP_HEARTBEAT})
+# telecontrol/velocity_control is never answered either (Flow 2),
+# and it is streamed every 200 ms while driving, so a queued place for it
+# would misattribute every later reply.
+UNACKNOWLEDGED_TOPICS = frozenset({TOPIC_CMD_APP_HEARTBEAT, TOPIC_CMD_VELOCITY_CONTROL})
+
+# Remote control timing. The app streams velocity every 200 ms while the
+# joystick is held; the robot drops out of remote control without a steady
+# stream (zero velocity included). Suction only runs a few seconds per mode
+# request, so the mode is re-sent while suction is wanted.
+REMOTE_CONTROL_STREAM_INTERVAL = 0.2  # seconds between velocity_control frames
+REMOTE_CONTROL_SUCTION_RESEND = 1.0  # seconds between suction mode re-sends
+REMOTE_CONTROL_MODE_RETRY = 1.0  # seconds between mode retries after a drop
+REMOTE_CONTROL_IDLE_TIMEOUT = 30.0  # leave remote control after this long without driving
+REMOTE_CONTROL_MAX_MOVE = 5.0  # longest a single move request may drive, seconds
 
 # display_map dropout detection — if robot is cleaning but no display_map
 # arrives for this long, escalate to a full wake burst to recover the
@@ -208,13 +228,15 @@ class WorkingStatus(IntEnum):
            parse time (#124, #115). Sub-field 4 looks like the task kind.
       3  = CLEANING_V2 (active cleaning; observed on newer Flow 2 firmware)
       4  = CLEANING (plan-based start; also stays 4 while returning to dock on older FW)
-      5  = CLEANING_ALT (observed live: robot was physically stuck when reporting 5)
+      5  = CLEANING_ALT (first seen while a robot was stuck; on a Flow 2 it
+           is the ordinary cleaning state)
       7  = REMAPPING (live 2026-07-09: robot exploring/rebuilding the map; camera
            active — developer/take_picture is accepted in this state)
       10 = DOCKED (on dock, charging)
       14 = CHARGED (on dock, fully charged)
       17 = CUSTOM_CLEANING (custom per-room clean; live-validated on Flow 2)
       19 = TASK_COMPLETED (transitional: scheduled task finished, returning to base)
+      21 = REMOTE_CONTROL (manual drive via telecontrol; Flow 2)
 
     Field 3 sub-fields (confirmed live):
       3.2  = 1 means PAUSED (overlay on CLEANING state)
@@ -235,12 +257,15 @@ class WorkingStatus(IntEnum):
     # revisit if a capture shows 3 means something else (e.g. a self-test state).
     CLEANING_V2 = 3   # active cleaning on newer Flow 2 firmware
     CLEANING = 4      # active cleaning (stays 4 even while returning to dock)
-    CLEANING_ALT = 5  # cleaning - seen when stuck; may indicate error/stuck state
+    CLEANING_ALT = 5  # cleaning; regular clean on Flow 2, first seen when stuck
     REMAPPING = 7     # mapping/exploration (live 2026-07-09); camera active, take_picture accepted
     DOCKED = 10       # on dock (does NOT reliably indicate charging vs charged)
     CHARGED = 14      # on dock (reported before 100% — use battery_level for charge state)
     CUSTOM_CLEANING = 17  # active custom per-room clean on Flow 2
     TASK_COMPLETED = 19  # transitional: task finished, robot returning to base (#41)
+    # Manual drive (telecontrol). Entered ~0.5 s after set_manual_control_mode;
+    # sub-field 3.19 is 1 joystick only, 2 suction running. Not a cleaning state.
+    REMOTE_CONTROL = 21
     # PLACEHOLDER: error state value not yet observed live.
     # Trigger a real error (e.g., pick up robot mid-clean) to discover the value.
     ERROR = 99
@@ -253,6 +278,35 @@ ACTIVE_CLEANING_STATUSES = frozenset(
         WorkingStatus.CLEANING_ALT,
         WorkingStatus.CUSTOM_CLEANING,
         WorkingStatus.REMAPPING,
+    }
+)
+
+
+class ManualControlMode(IntEnum):
+    """telecontrol/set_manual_control_mode values (app MANUAL_CONTROL_MODE_*).
+
+    OFF leaves remote control; it is the protobuf default, so it is sent as an
+    empty payload. 3-7 drive with suction quiet / standard / strong / super
+    powerful / ultra powerful. robot_base_status field 31 reports mode + 1.
+    """
+
+    OFF = 0
+    JOYSTICK = 1
+    CLEAN_DEFAULT = 2
+    SWEEP_MUTE = 3
+    SWEEP_NORMAL = 4
+    SWEEP_STRONG = 5
+    SWEEP_DEEP = 6
+    SWEEP_SUPER = 7
+
+
+REMOTE_CONTROL_SUCTION_MODES = frozenset(
+    {
+        ManualControlMode.SWEEP_MUTE,
+        ManualControlMode.SWEEP_NORMAL,
+        ManualControlMode.SWEEP_STRONG,
+        ManualControlMode.SWEEP_DEEP,
+        ManualControlMode.SWEEP_SUPER,
     }
 )
 
@@ -334,11 +388,14 @@ class BaseStatusField(IntEnum):
     DEVICE_STATUS_CODE_LIST = 25
     FAN_LEVEL = 26  # active suction (FanLevel enum)
     MOP_HUMIDITY = 29  # active water level (MopHumidity enum)
+    MANUAL_CONTROL_MODE = 31  # ManualControlMode + 1; absent outside remote control
     STATION_BAG_HEALTH_SCORE = 35  # float32, %
     STATION_BAG_HEALTH_RESET_TIME = 36  # epoch
+    FAN_COOLDOWN = 37  # suction cool-down, seconds, counts down; absent when none
     CURING_AGENT_CONSUMPTION_PERCENT = 38
     HEAVY_DETERGENT_REMAIN_PERCENT = 41
     CHARGING_STATUS = 47  # canonical charging state (enum)
+    DOCK_LIGHT_MODE = 50  # AmbientLightCtrlType; absent when the light is off
 
 
 # upgrade_status field numbers (OTAUpgradeStatus)

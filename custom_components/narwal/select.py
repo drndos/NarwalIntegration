@@ -35,6 +35,7 @@ from .coordinator import (
     is_live_clean_setting_available,
 )
 from .entity import NarwalEntity
+from .remote_control import NarwalRemoteControlSuctionSelect
 from .narwal_client import (
     CleaningRoute,
     CommandResult,
@@ -348,6 +349,7 @@ async def async_setup_entry(
                 LegacyNarwalSettingSelect(coordinator, description)
                 for description in LEGACY_SELECT_DESCRIPTIONS
             ),
+            NarwalRemoteControlSuctionSelect(coordinator),
         ]
     )
     async_add_room_setting_entities()

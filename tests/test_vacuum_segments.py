@@ -64,6 +64,7 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     coordinator.config_entry.entry_id = "entry-1"
     coordinator.config_entry.title = "Narwal Test"
     coordinator.client = MagicMock()
+    coordinator.client.remote_control_active = False
     coordinator.client.state = client_state
     coordinator.client.state.firmware_version = "1.0.0"
     coordinator.client.get_map = AsyncMock(return_value=client_state.map_data)

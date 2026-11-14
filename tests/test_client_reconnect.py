@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock
 
+import logging
+
 import pytest
+from websockets.exceptions import ConnectionClosed
+from websockets.frames import Close
 
 import narwal_client.client as client_module
 from narwal_client.client import NarwalClient, NarwalConnectionError
@@ -31,6 +35,8 @@ class FakeSocket:
         message = await self.recv()
         if message is None:
             raise StopAsyncIteration
+        if isinstance(message, BaseException):
+            raise message
         return message
 
 
@@ -206,3 +212,25 @@ async def test_queued_command_is_not_sent_after_disconnect(client):
         if client._command_lock.locked():
             client._command_lock.release()
         await cancel_tasks(pending)
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("connection with same ip, close old one", "another client connected"),
+        ("bye", "Connection closed: received 1000 (OK) bye"),
+    ],
+)
+async def test_listener_explains_same_ip_close(client, caplog, reason, expected):
+    old = client._ws
+    listener = asyncio.create_task(client.start_listening())
+    try:
+        async with asyncio.timeout(1):
+            await old.receiving.wait()
+            client._should_reconnect = False
+            old.incoming.put_nowait(ConnectionClosed(Close(1000, reason), None))
+            with caplog.at_level(logging.WARNING, logger=client_module.__name__):
+                await listener
+        assert expected in caplog.text
+    finally:
+        await cancel_tasks(listener)

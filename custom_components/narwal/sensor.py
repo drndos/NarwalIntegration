@@ -19,6 +19,7 @@ from . import NarwalConfigEntry
 from .const import CONF_PRODUCT_KEY, TASK_RESULT_OPTIONS, product_keys_for_model
 from .coordinator import NarwalCoordinator
 from .entity import NarwalDockEntity, NarwalEntity
+from .remote_control import NarwalFanCooldownSensor
 from .narwal_client import NarwalState
 
 # Product keys for models without an auto-detergent tank.
@@ -150,6 +151,7 @@ async def async_setup_entry(
         )
     ]
     entities.append(NarwalChargingStateSensor(coordinator))
+    entities.append(NarwalFanCooldownSensor(coordinator))
     async_add_entities(entities)
 
 

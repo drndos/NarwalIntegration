@@ -27,6 +27,7 @@ from .dock_tasks import (
     is_robot_work_context,
 )
 from .entity import NarwalDockEntity, NarwalEntity
+from .remote_control import NarwalRemoteControlSwitch
 from .narwal_client import (
     CommandResponse,
     CommandResult,
@@ -139,6 +140,7 @@ async def async_setup_entry(
         NarwalMapOptionSwitch(coordinator, description)
         for description in MAP_SWITCHES
     )
+    async_add_entities([NarwalRemoteControlSwitch(coordinator)])
     async_add_room_selection_entities()
     entry.async_on_unload(coordinator.async_add_listener(async_add_room_selection_entities))
 

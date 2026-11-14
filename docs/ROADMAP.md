@@ -11,7 +11,9 @@ release is tracked on the repository's
 1. **Repair issues.** The integration raises a repair only for an invalidated area mapping. v1.0.8 renamed suction tiers and removed a sensor; changes like that should surface as repairs rather than release-notes prose.
 2. **Multi-floor map switching** ([#43](https://github.com/sjmotew/NarwalIntegration/issues/43)). The only substantial unimplemented request, now tractable through the `map_id` plumbing that landed with the room profiles.
 3. **Last-clean sensors** ([#32](https://github.com/sjmotew/NarwalIntegration/issues/32)).
-4. **Home Assistant 2027.8 deprecations.** `via_device` in the entity device info and `async_get_device` in setup both log deprecation warnings on current HA; both need replacing before that release.
+4. **Remote control (manual drive).** Code landed on `feat/remote-control`; needs hardware verification through Home Assistant on a Flow 2 and a probe on other models. See [REMOTE-CONTROL.md](REMOTE-CONTROL.md).
+5. **What actually wakes a robot that stops answering on port 9002.** The wake burst is mostly untested folklore (see PROTOCOL.md §4). A Matter-based test is running; an app-traffic capture and a decompiled-app search are the other routes.
+6. **Home Assistant 2027.8 deprecations.** `via_device` in the entity device info and `async_get_device` in setup both log deprecation warnings on current HA; both need replacing before that release.
 
 ## On hold
 
@@ -22,8 +24,8 @@ Researched and probed, parked pending further reverse engineering.
 | **Camera snapshots** | Client method works (robot returns ~170 KB) | Image data is **AES-encrypted**. A community setup ([#157](https://github.com/sjmotew/NarwalIntegration/issues/157), @marczukmichal) obtains a per-device key from the Narwal cloud account once and decrypts locally; that route needs a cloud login, so it belongs in an optional companion, not the core integration |
 | **Camera LED control** | Partial response from robot | Correct payload format unconfirmed; needs idle-state testing |
 | **Vision obstacle overlay** | Built, tested, removed | Robot broadcasts raw AI candidates (3 to 6× more than the app shows), not confirmed detections. Unusable for a map overlay |
-| **Patrol / cruise mode** | Topics identified in APK | Not yet probed; depends on the camera working first |
-| **Live video** | App uses an Agora session with cloud-issued tokens | Cloud-dependent by design. A community add-on joins the session with the Agora Python server SDK and serves frames to a dashboard ([#157](https://github.com/sjmotew/NarwalIntegration/issues/157), @marczukmichal); the same caveat as the snapshot key applies |
+| **Patrol / cruise mode** | Topics identified in APK; Flow 2 reports `supportVideoCruiseTask` | Not yet probed; depends on the camera working first |
+| **Live video** | Protocol decoded ([PROTOCOL.md](PROTOCOL.md#multimedia-live-video)): the robot streams only through Alibaba Link Visual or Agora; `multimedia/streaming_command` hands the app the Ali device credentials. No local stream port. On a Flow 2 the credentials request returns `102` and empty keys | Cloud-dependent by design. Open question: whether a cloud-connected, video-activated robot returns its Ali device triple locally, which could allow a session without the Narwal account. A community add-on joins the session with the Agora Python server SDK and serves frames to a dashboard ([#157](https://github.com/sjmotew/NarwalIntegration/issues/157), @marczukmichal); the same caveat as the snapshot key applies |
 
 ## Further out
 
@@ -31,9 +33,9 @@ Researched and probed, parked pending further reverse engineering.
 
 | Piece | Status |
 |---|---|
-| Send the robot to a point or room | Room cleans work today; patrol topics are identified in the APK and unprobed |
+| Send the robot to a point or room | Room cleans work today; manual drive works on the Flow 2; `telecontrol/point_navi`, `navi_to_room` and `navi_to_region` are identified in the app and unprobed |
 | Still images | Snapshot works, decryption needs the per-device key (above) |
-| Live video | Agora session, cloud tokens; community add-on exists (above) |
+| Live video | Alibaba Link Visual or Agora, both cloud; protocol decoded; community add-on exists (above). `status/streaming_info` and `status/streaming_active_event` could still drive a local "camera in use" sensor |
 | Sounds | `locate` plays the find-me chime today; the speaker topics for arbitrary audio are unexplored |
 | Return to dock afterwards | Works today |
 
@@ -49,5 +51,6 @@ explains how to take one.
 - **Does the Freo X Ultra speak the local protocol?** The compatibility table says no, per [#4](https://github.com/sjmotew/NarwalIntegration/issues/4). A product key and `nmap -p 9002` from an owner settles it either way.
 - **Why does the plain Freo Z10 refuse port 9002?** It advertises over mDNS like every other model, then returns `ECONNREFUSED` ([#92](https://github.com/sjmotew/NarwalIntegration/issues/92)). Two units show the same signature, with 22 high ports open; an `nmap -sV` fingerprint and an app-to-robot capture would tell us what it listens on instead.
 - **When does a Flow 2 report its clean-water and detergent tanks?** Nothing changes in `base_status` while docked and idle. A dump taken while the dock is washing with a tank removed would show whether the fields ever move ([#128](https://github.com/sjmotew/NarwalIntegration/issues/128)).
+- **Can the robot mop during remote control?** Nothing in Narwal app 2.9.90 does it: `ManualControlMode` has eight values (0 off, 1 joystick, 2 `CLEAN_DEFAULT`, 3–7 suction quiet…ultra), `velocity_control` only carries speeds, and the Flow 2 drive screen sends only joystick or a suction mode. Its `isDryMop` check blocks manual drive while the mop dries. The open lead is mode 2, which the app never sends; its name suggests "drive with the current clean settings", which could include the mop. To test, with someone watching the robot since it may wet the floor: send `telecontrol/set_manual_control_mode {1: 2}`, stream `velocity_control`, and note the reply, whether the mop turns or water flows, and which `robot_base_status` fields change against mode 1. See [PROTOCOL.md](PROTOCOL.md#remote-control-telecontrol).
 
 Answered since the list began: the fifth suction tier exists and is reachable on the Flow 2 but not from the AX26 app ([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)); see PROTOCOL.md §11 for the detail.

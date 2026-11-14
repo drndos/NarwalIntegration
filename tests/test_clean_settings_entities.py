@@ -1022,7 +1022,7 @@ class TestRoomNarwalSettingSelect:
 
         assert len(added_entities) == len(SELECT_DESCRIPTIONS) + len(
             LEGACY_SELECT_DESCRIPTIONS
-        ) + len(ROOM_SELECT_DESCRIPTIONS)
+        ) + len(ROOM_SELECT_DESCRIPTIONS) + 1  # + remote control suction
         assert room_mode._attr_translation_placeholders == {"room_name": "Pantry"}
         assert room_mode.extra_state_attributes["room_name"] == "Pantry"
 

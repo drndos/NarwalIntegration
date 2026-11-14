@@ -102,3 +102,74 @@ set_pending_profiles:
         selection; use [] to clear it for whole-floor cleaning. Room order is unchanged.
       selector:
         object:
+
+remote_control_start:
+  name: Start remote control
+  description: Put the robot in manual drive. Verified on the Flow 2. Ends after 30 s without a move.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum
+  fields:
+    suction:
+      name: Suction
+      description: Suction while driving.
+      selector:
+        select:
+          translation_key: remote_control_suction
+          options:
+            - "off"
+            - quiet
+            - standard
+            - strong
+            - super
+            - ultra
+
+remote_control_move:
+  name: Remote control move
+  description: Drive for a short time, then hold still. Call repeatedly to keep moving.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum
+  fields:
+    linear:
+      name: Linear speed
+      description: Percent, positive forward, negative backward.
+      default: 0
+      selector:
+        number:
+          min: -100
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+    angular:
+      name: Turn speed
+      description: Percent, positive left, negative right.
+      default: 0
+      selector:
+        number:
+          min: -100
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+    duration:
+      name: Duration
+      description: Seconds to keep this speed (max 5).
+      default: 0.5
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.1
+          unit_of_measurement: s
+
+remote_control_stop:
+  name: Stop remote control
+  description: Stop driving and leave manual drive.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum

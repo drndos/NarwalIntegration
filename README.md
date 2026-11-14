@@ -30,6 +30,7 @@ Another model? Run `nmap -p 9002 <vacuum-ip>`; if the port is open, [open an iss
 - **Live map camera** with room labels, furniture, dock and trail; position, dock and trail attributes for map cards
 - **Sensors and alerts**: battery, cleaning time and area, current room, task progress, tanks, dust bag, consumables, errors
 - **Dock controls**: empty dustbin, wash mop, dry mop, dry dust bin, dry dock bag; ambient light on docks that have one
+- **Remote control** (Flow 2): drive the robot by hand, with or without suction, through `narwal.remote_control_*` actions ([docs/REMOTE-CONTROL.md](docs/REMOTE-CONTROL.md))
 - **Connectivity**: push updates, auto-reconnect, keepalive, mDNS and DHCP discovery, German, French and Korean translations
 
 ## Installation
@@ -72,6 +73,7 @@ to a report: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 | [docs/SETUP.md](docs/SETUP.md) | Discovery, VLANs, the CX7 Device ID |
 | [docs/ROOM-CLEANING.md](docs/ROOM-CLEANING.md) | Area mapping, per-room profiles, actions, automation example |
 | [docs/MAP-CARD.md](docs/MAP-CARD.md) | Map camera attributes for dashboard cards |
+| [docs/REMOTE-CONTROL.md](docs/REMOTE-CONTROL.md) | Driving the robot by hand: actions, entities, limits |
 | [docs/MODELS.md](docs/MODELS.md) | Compatibility evidence per model |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Quick fixes, limitations, diagnostics |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | The local WebSocket protocol, for contributors |

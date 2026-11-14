@@ -9,7 +9,13 @@ import pytest
 
 sys.modules.setdefault("yaml", MagicMock())
 
-from tools.gen_dashboard import collect, rooms_section  # noqa: E402
+from tools.gen_dashboard import (  # noqa: E402
+    collect,
+    collect_vacuum,
+    drive_script_config,
+    rooms_section,
+    vacuum_sections,
+)
 
 
 def test_collect_ignores_disabled_room_controls() -> None:
@@ -116,3 +122,62 @@ def test_room_panel_includes_numeric_order_control() -> None:
     assert room_cards[1]["features"] == [
         {"type": "numeric-input", "style": "buttons"}
     ]
+
+
+DEV = "0123456789abcdef0123456789abcdef"
+
+
+def _entry(key: str, entity_id: str, disabled: bool = False) -> dict:
+    return {"unique_id": f"{DEV}_{key}", "entity_id": entity_id,
+            "disabled_by": "integration" if disabled else None}
+
+
+def test_vacuum_sections_drive_pad_targets_vacuum_and_hides_when_off() -> None:
+    """The pad only shows while driving and every button moves the vacuum."""
+    ents = collect_vacuum([
+        _entry("map", "camera.n_map"),
+        _entry("carpet_map", "camera.n_carpet_map"),
+        _entry("remote_control", "switch.n_remote_control"),
+        _entry("remote_control_suction", "select.n_rc_suction"),
+        _entry("suction_cooldown", "sensor.n_cooldown", disabled=True),
+        _entry("battery", "sensor.n_battery"),
+    ])
+    assert ents["map"] == "camera.n_map"
+    assert "suction_cooldown" not in ents
+
+    robot, remote = vacuum_sections(ents, "vacuum.n")
+    assert robot["cards"][1]["entity"] == "camera.n_map"
+    pad = [c for c in remote["cards"] if c["type"] == "button"]
+    assert len(pad) == 9
+    for button in pad:
+        assert button["visibility"] == [
+            {"condition": "state", "entity": "switch.n_remote_control", "state": "on"}
+        ]
+    moving = [b for b in pad if b["name"] != "Hold still"]
+    for button in moving:
+        assert button["tap_action"]["perform_action"] == "script.narwal_drive"
+        assert button["tap_action"]["data"]["duration"] == 1.0
+        assert button["hold_action"]["data"]["duration"] == 3.0
+    still = next(b for b in pad if b["name"] == "Hold still")
+    assert still["tap_action"]["perform_action"] == "narwal.remote_control_move"
+    assert still["tap_action"]["target"] == {"entity_id": "vacuum.n"}
+    assert still["tap_action"]["data"] == {"linear": 0, "angular": 0, "duration": 0}
+    slider = next(c for c in remote["cards"] if c.get("entity") == "input_number.narwal_drive_speed")
+    assert slider["features"] == [{"type": "numeric-input", "style": "slider"}]
+
+
+def test_drive_script_scales_by_speed_slider() -> None:
+    """The script targets the vacuum and reads the slider in both axes."""
+    script = drive_script_config("vacuum.n")["narwal_drive"]
+    assert script["mode"] == "restart"
+    step = script["sequence"][0]
+    assert step["action"] == "narwal.remote_control_move"
+    assert step["target"] == {"entity_id": "vacuum.n"}
+    for axis in ("linear", "angular"):
+        assert "input_number.narwal_drive_speed" in step["data"][axis]
+        assert step["data"][axis].startswith("{{ (" + axis)
+
+
+def test_vacuum_sections_without_remote_control_switch() -> None:
+    """Models with remote control disabled get only the robot section."""
+    assert len(vacuum_sections({}, "vacuum.n")) == 1

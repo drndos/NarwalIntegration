@@ -256,6 +256,7 @@ def is_narwal_task_busy(state: NarwalState | None) -> bool:
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
         or state.working_status == WorkingStatus.REMAPPING
+        or state.working_status == WorkingStatus.REMOTE_CONTROL
         or (
             state.working_status == WorkingStatus.TASK_COMPLETED
             and not state.has_current_dock_presence_signal
@@ -406,6 +407,11 @@ def can_return_home(state: NarwalState | None) -> bool:
     """Return True when the robot can be recalled to the dock."""
     if has_blocking_error(state):
         return False
+    if state.is_idle_after_remote_control:
+        # Sits still after manual drive. Live on a Flow 2, a recall was
+        # accepted and docked it while the station reported drying (3.18 = 4),
+        # so dock work does not block it here.
+        return True
     return (
         not state.is_docked
         and state.working_status != WorkingStatus.TASK_COMPLETED
@@ -453,6 +459,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             supports_broadcasts=supports_broadcasts,
         )
         self.clean_settings = CleanSettings()
+        # Suction for the next remote-control session (remote_control.py).
+        self.remote_control_suction: str = "off"
         self.room_clean_settings: dict[tuple[str | None, int], RoomCleanSettings] = {}
         self.room_clean_settings_customized: dict[tuple[str | None, int], set[str]] = {}
         self.selected_clean_rooms: dict[str | None, set[int]] = {}
