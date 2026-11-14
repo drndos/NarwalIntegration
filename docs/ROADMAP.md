@@ -24,8 +24,8 @@ Researched and probed, parked pending further reverse engineering.
 | **Camera snapshots** | Client method works (robot returns ~170 KB) | Image data is **AES-encrypted**. A community setup ([#157](https://github.com/sjmotew/NarwalIntegration/issues/157), @marczukmichal) obtains a per-device key from the Narwal cloud account once and decrypts locally; that route needs a cloud login, so it belongs in an optional companion, not the core integration |
 | **Camera LED control** | Partial response from robot | Correct payload format unconfirmed; needs idle-state testing |
 | **Vision obstacle overlay** | Built, tested, removed | Robot broadcasts raw AI candidates (3 to 6× more than the app shows), not confirmed detections. Unusable for a map overlay |
-| **Patrol / cruise mode** | Topics identified in APK | Not yet probed; depends on the camera working first |
-| **Live video** | App uses an Agora session with cloud-issued tokens | Cloud-dependent by design. A community add-on joins the session with the Agora Python server SDK and serves frames to a dashboard ([#157](https://github.com/sjmotew/NarwalIntegration/issues/157), @marczukmichal); the same caveat as the snapshot key applies |
+| **Patrol / cruise mode** | Topics identified in APK; Flow 2 reports `supportVideoCruiseTask` | Not yet probed; depends on the camera working first |
+| **Live video** | Protocol decoded ([PROTOCOL.md](PROTOCOL.md#multimedia-live-video)): the robot streams only through Alibaba Link Visual or Agora; `multimedia/streaming_command` hands the app the Ali device credentials. No local stream port. On a Flow 2 the credentials request returns `102` and empty keys | Cloud-dependent by design. Open question: whether a cloud-connected, video-activated robot returns its Ali device triple locally, which could allow a session without the Narwal account. A community add-on joins the session with the Agora Python server SDK and serves frames to a dashboard ([#157](https://github.com/sjmotew/NarwalIntegration/issues/157), @marczukmichal); the same caveat as the snapshot key applies |
 
 ## Further out
 
@@ -35,7 +35,7 @@ Researched and probed, parked pending further reverse engineering.
 |---|---|
 | Send the robot to a point or room | Room cleans work today; manual drive works on the Flow 2; `telecontrol/point_navi`, `navi_to_room` and `navi_to_region` are identified in the app and unprobed |
 | Still images | Snapshot works, decryption needs the per-device key (above) |
-| Live video | Agora session, cloud tokens; community add-on exists (above) |
+| Live video | Alibaba Link Visual or Agora, both cloud; protocol decoded; community add-on exists (above). `status/streaming_info` and `status/streaming_active_event` could still drive a local "camera in use" sensor |
 | Sounds | `locate` plays the find-me chime today; the speaker topics for arbitrary audio are unexplored |
 | Return to dock afterwards | Works today |
 

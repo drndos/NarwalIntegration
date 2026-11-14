@@ -377,6 +377,72 @@ Unexplored topics in the same group: `point_navi`, `stop_point_navi`, `navi_to_r
 | `developer/led_control` | Toggle the robot's LED |
 | `developer/ping` | Ping/pong |
 
+### Multimedia (live video)
+
+Field numbers decoded from the Narwal app 2.9.90 with blutter; replies probed on a Flow 2
+(v01.10.30.02). The robot serves no video locally: no stream port opens (RTSP, RTMP, HTTP and
+others scanned before and after the commands below). The local socket only hands the app the
+credentials it needs to start a cloud session, through **Alibaba Link Visual** (`nr_pita_video_ali_controller`)
+or **Agora** (`nr_pita_video_agora_controller`).
+
+This Flow 2 silently ignores topics without its real device id, so the empty-id discovery
+probe gets no reply from it.
+
+| Topic | Request | Reply |
+|---|---|---|
+| `multimedia/streaming_command` | `StreamingCommand.Request` | `StreamingCommand.Response` |
+| `multimedia/streaming_heartbeat` | `StreamingHeartbeat`, app → robot while viewing | none |
+| `multimedia/agora_video_start_result` | — | `AgoraVideoStartResult` {1 sessionId, 2 channel, 3 errCode, 4 errMsg} |
+| `status/streaming_info` | — | `StreamingInfo` broadcast |
+| `status/streaming_active_event` | — | {1 `streamingEventType`: 0 UNSPECIFIED, 1 ACTIVE} |
+| `status/video_cruise_task_status` | — | `VideoCruiseStatus` broadcast (patrol) |
+| `map/get_vision_image` | {1 type: 0 UNSPECIFIED, 1 OBS; 2 id int32} | {1 result, 2 originImage bytes, 3 url, 4 box, 5 imageRoi, 6 detectResultConfirmed, 7 position, 8 fileName, 9 unifiedErrorCode} |
+
+```
+StreamingCommand.Request {
+  1: action      uint32   // 1 start / query, 0 end
+  2: payload     string   // JSON, e.g. {"version":2,"data":{"regionID":"<short region id>"}}
+  3: type        uint32   // 0 video status, 1 device online, 2 device ready
+  4: extraData   string
+  5: debugMode   bool
+}
+StreamingCommand.Response {
+  1: result              uint32
+  2: streamingAccessKey  { 1 productKey, 2 deviceName, 3 deviceSecret }   // Alibaba IoT device triple
+  3: streamingToken      { 1 token }
+  4: payload             string
+  5: unifiedErrorCode    uint32
+}
+StreamingHeartbeat { 1 timestamp int64, 2 isPostProcessing, 3 runStatus uint32,
+                     4 isVideoLinkConnected, 5 isMicOpen }
+StreamingInfo      { 1 timestamp int64, 2 isVideoLinkConnected, 3 isVideoRunning,
+                     4 isTransferringVideoStream, 5 isTransferringAudioStream,
+                     6 mediaStatus, 7 ispStatus, 8 audioStauts }   // all uint32 / bool
+```
+
+`RobotBaseStatus` carries a `StreamingStatus` enum: IDLE, STARTING, AUDIO, VIDEO, AUDIO_VIDEO
+(field number not yet mapped).
+
+How the app starts Ali video (`nr_video_kit_manager`): log into Link Visual; send
+`streaming_command` {action 1, type 0, payload with the region}; read `streamingAccessKey`
+from the reply (error toast `103` when it is empty); bind the device in the Ali cloud
+(`bindDeviceWithToken`); then send type 1 (online) and type 2 (ready), each with the same payload.
+`endVideoStatus` sends action 0.
+
+Observed on the Flow 2:
+
+- No payload → `{2: {}, 3: {}}`: empty access key and token, no result code. The first such
+  request took 4.8 s, later ones were instant.
+- Any region payload → `result 102`, still empty: tried `eu-central-1`, `cn-shanghai`,
+  `ap-southeast-1`, 0–6 as numbers and strings, `eu`/`de`/`us`/`sg`/`cn`. 102 is likely "not
+  available" (no cloud reachability, or video never activated in the app) rather than a bad region.
+- `map/get_vision_image` type 1 → `result 1` with no image data; empty request → `2`.
+
+`common/get_feature_list` video-related fields (Flow 2 values in brackets):
+41 `supportVideoCruiseTask` [1], 54 `supportVideoStreaming` [unset], 62
+`supportAgoraVideoStreaming` [1], 63 `videoStreamingHasLdc` [1], 67 `streamingActiveShortcut`
+enum (0 DEFAULT, 1 ROBOT_RECALL_TRIPLE) [1], 101 `agoraVideoStreamingType` enum (0 DEFAULT, 1 AAC) [unset].
+
 ---
 
 ## 6. The clean command
